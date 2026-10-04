@@ -1,0 +1,5 @@
+# Indekset er afledt data — genopbygges med `router.py index`.
+skills.db
+skills.db-journal
+*.json.tmp
+__pycache__/

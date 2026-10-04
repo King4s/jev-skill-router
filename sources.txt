@@ -1,0 +1,90 @@
+# Skill sources — GitHub repos (owner/repo), one per line.
+# Sections mirror Marcin's oversight 2026-10-04. Registries/marketplaces
+# (skills.sh, SkillsMP, Smithery, clawhub, cursor.directory) hold no git tree
+# and are handled separately (API or npx skills).
+#
+# 1. Official vendor repos
+anthropics/skills
+anthropics/claude-code
+anthropics/claude-plugins-official
+anthropics/knowledge-work-plugins
+github/awesome-copilot
+vercel-labs/agent-skills
+openai/skills
+openai/plugins
+huggingface/skills
+cursor/plugins
+google-labs-code/stitch-skills
+google/agents-cli
+google-gemini/gemini-skills
+trailofbits/skills
+remotion-dev/skills
+microsoft/skills
+microsoft/azure-skills
+cloudflare/skills
+supabase/agent-skills
+expo/skills
+stripe/ai
+getsentry/skills
+awslabs/agent-plugins
+hashicorp/agent-skills
+firebase/agent-skills
+# 2. Community collections
+obra/superpowers
+mattpocock/skills
+nextlevelbuilder/ui-ux-pro-max-skill
+addyosmani/agent-skills
+Leonxlnx/taste-skill
+pbakaus/impeccable
+coreyhaines31/marketingskills
+K-Dense-AI/scientific-agent-skills
+wshobson/agents
+alirezarezvani/claude-skills
+phuryn/pm-skills
+EveryInc/compound-engineering-plugin
+Orchestra-Research/AI-Research-SKILLs
+Jeffallan/claude-skills
+Mindrally/skills
+# 3. Awesome lists
+ComposioHQ/awesome-claude-skills
+hesreallyhim/awesome-claude-code
+VoltAgent/awesome-openclaw-skills
+sickn33/agentic-awesome-skills
+PatrickJS/awesome-cursorrules
+VoltAgent/awesome-agent-skills
+composio-community/awesome-codex-skills
+travisvn/awesome-claude-skills
+BehiSecc/awesome-claude-skills
+libukai/awesome-agent-skills
+spencerpauly/awesome-cursor-skills
+ZeroPointRepo/awesome-hermes-skills
+# 4. Marketplaces & registries (git-backed ones)
+openclaw/clawhub
+davepoon/buildwithclaude
+obra/superpowers-marketplace
+numman-ali/n-skills
+LinklyAI/best-skills
+trailofbits/skills-curated
+skilld-dev/skilld
+# 5. Tooling (build/share/convert/scan skills)
+vercel-labs/skills
+davila7/claude-code-templates
+agentskills/agentskills
+agentsmd/agents.md
+NVIDIA/SkillSpector
+microsoft/SkillOpt
+yusufkaraaslan/Skill_Seekers
+rebelytics/one-skill-to-rule-them-all
+intellectronica/ruler
+cisco-ai-defense/skill-scanner
+rohitg00/skillkit
+dyoshikawa/rulesync
+jiweiyeah/Skills-Manager
+huggingface/upskill
+EverMind-AI/SkillCorpus
+K-Dense-AI/claude-skills-mcp
+VintLin/skill-flow
+numman-ali/openskills
+# 6. GitLab / HuggingFace
+gitlab:gitlab-org/ai/skills
+hf-skills (org — Spaces, not a git tree)
