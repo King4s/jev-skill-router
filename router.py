@@ -22,6 +22,7 @@ import argparse
 import concurrent.futures as cf
 import hashlib
 import json
+import math
 import os
 import re
 import sqlite3
@@ -279,22 +280,62 @@ def cmd_stats(args) -> int:
 
 # ---------------------------------------------------------------- route
 
-def shortlist(db: sqlite3.Connection, project: str, top: int) -> list[dict]:
-    """FTS5 BM25-prefilter. Ingen embeddings: 10k rækker er ingenting for FTS.
-    Tokenisering matcher FTS5's egen (unicode61): bindestreg og underscore deler,
-    ellers dør sammensatte ord som 'MCP-tjeneste' og 'FTS5-indeks' på df=0."""
+def shortlist(db: sqlite3.Connection, project: str, top: int, rule: str = "plain") -> list[dict]:
+    """FTS5-prefilter. Ingen embeddings: 10k rækker er ingenting for FTS.
+
+    To regler, målt mod hinanden i scripts/eval_shortlist.py:
+    * "bm25" — én OR-forespørgsel, rangeret af FTS5's bm25. Fylder listen med
+      dokumenter der matcher mange *almindelige* ord: engelsk prosa ('and', 'use',
+      'to') findes i næsten hver skill-beskrivelse, så funktionsord dominerer.
+      Målt: 'just-scrape' matchede 9 af Tilbud-beskrivelsens ord, hvoraf 8 var
+      funktionsord — og 'llm-evaluation', den substantivt rigtige skill, lå #248.
+    * "idf" — hvert ord slås op for sig, og et dokument scorer summen af
+      log(total/df) for de ord den matcher. **Målt dårligere (5/15 mod 11/15)**:
+      et enkelt ultra-sjældent ord ('friends', 'seventeen') vejer så tungt at
+      støjord slår dokumenter der matcher flere relevante ord. Beholdt kun fordi
+      eval-harnesset skal kunne måle den igen — den er ikke i brug.
+
+    Tokeniseringen matcher FTS5's egen (unicode61), ellers får sammensatte ord som
+    'MCP-tjeneste' df=0 og falder ud af begge regler."""
     raw = re.findall(r"[^\W_]+", project, re.UNICODE)
     words = list(dict.fromkeys(w for w in raw if len(w) >= 2 and not w.isdigit()))[:40]
     if not words:
         return []
-    query = " OR ".join(f'"{w}"' for w in words)
-    rows = db.execute(
-        "SELECT s.id, s.name, s.desc, s.repo, s.url, s.tier, bm25(skills_fts) AS r "
-        "FROM skills_fts JOIN skills s ON s.id = skills_fts.rowid "
-        "WHERE skills_fts MATCH ? AND s.dup_of IS NULL "
-        "ORDER BY r LIMIT ?", (query, top)).fetchall()
-    return [{"id": r[0], "name": r[1], "desc": r[2], "repo": r[3], "url": r[4],
-             "tier": r[5], "bm25": r[6]} for r in rows]
+    total = db.execute("SELECT COUNT(*) FROM skills WHERE dup_of IS NULL").fetchone()[0]
+
+    dfs = {w: db.execute("SELECT COUNT(*) FROM skills_fts WHERE skills_fts MATCH ?",
+                         (f'"{w}"',)).fetchone()[0] for w in words}
+    if rule == "plain":                      # ingen df-filtrering overhovedet
+        informative = words
+    else:
+        informative = [w for w in words if 0 < dfs[w] < 0.30 * total] or words
+
+    if rule in ("bm25", "plain"):
+        query = " OR ".join(f'"{w}"' for w in informative)
+        rows = db.execute(
+            "SELECT s.id, s.name, s.desc, s.repo, s.url, s.tier, bm25(skills_fts) AS r "
+            "FROM skills_fts JOIN skills s ON s.id = skills_fts.rowid "
+            "WHERE skills_fts MATCH ? AND s.dup_of IS NULL ORDER BY r LIMIT ?",
+            (query, top)).fetchall()
+        return [{"id": r[0], "name": r[1], "desc": r[2], "repo": r[3], "url": r[4],
+                 "tier": r[5], "bm25": r[6]} for r in rows]
+
+    scores: dict[int, float] = {}
+    for w in informative:
+        idf = math.log(total / dfs[w])
+        for (rid,) in db.execute("SELECT rowid FROM skills_fts WHERE skills_fts MATCH ?",
+                                 (f'"{w}"',)):
+            scores[rid] = scores.get(rid, 0.0) + idf
+    best = sorted(scores.items(), key=lambda kv: -kv[1])[:top]
+    if not best:
+        return []
+    marks = ",".join("?" * len(best))
+    meta = {r[0]: r for r in db.execute(
+        f"SELECT id, name, desc, repo, url, tier FROM skills WHERE id IN ({marks})",
+        [b[0] for b in best])}
+    return [{"id": i, "name": meta[i][1], "desc": meta[i][2], "repo": meta[i][3],
+             "url": meta[i][4], "tier": meta[i][5], "score": s}
+            for i, s in best if i in meta]
 
 
 def jev_key() -> str:
