@@ -39,6 +39,7 @@ JEV_API = "https://api.typesafe.ai/v1/systemone"
 JEV_MODEL = os.environ.get("JEV_MODEL", "jev-latest")
 KEY_FILE = Path.home() / ".config" / "jev-loop" / "typesafe_api_key"
 FM_BYTES = 4096          # frontmatter lives in the first few KB of the file
+PER_WORD = 20            # the "pool" rule: how many documents each query word contributes
 TIERS = {"1": "vendor", "2": "community", "3": "list", "4": "registry", "5": "tooling", "6": "gitlab"}
 
 # Score levels: situations, not degrees (docs.typesafe.ai/primitives/score).
@@ -280,6 +281,33 @@ def cmd_stats(args) -> int:
 
 # ---------------------------------------------------------------- route
 
+def _pool_rank(db: sqlite3.Connection, informative: list[str], dfs: dict, total: int,
+               top: int) -> list[dict]:
+    """Each query word contributes its own best PER_WORD documents, and the union is
+    ranked by how many of the description's words a document matches before the idf sum
+    breaks ties. This is what surfaces documents the single OR query buries — measured
+    at 8/15 alone, but it is the only rule that finds some of them."""
+    pool: dict[int, float] = {}
+    matched: dict[int, int] = {}
+    for w in informative:
+        idf = math.log(total / dfs[w])
+        for (rid,) in db.execute(
+                "SELECT rowid FROM skills_fts WHERE skills_fts MATCH ? "
+                "ORDER BY bm25(skills_fts) LIMIT ?", (f'"{w}"', PER_WORD)):
+            pool[rid] = pool.get(rid, 0.0) + idf
+            matched[rid] = matched.get(rid, 0) + 1
+    best = sorted(pool.items(), key=lambda kv: (-matched[kv[0]], -kv[1]))[:top]
+    if not best:
+        return []
+    marks = ",".join("?" * len(best))
+    meta = {r[0]: r for r in db.execute(
+        f"SELECT id, name, desc, repo, url, tier FROM skills WHERE id IN ({marks})",
+        [b[0] for b in best])}
+    return [{"id": i, "name": meta[i][1], "desc": meta[i][2], "repo": meta[i][3],
+             "url": meta[i][4], "tier": meta[i][5], "score": s}
+            for i, s in best if i in meta]
+
+
 def shortlist(db: sqlite3.Connection, project: str, top: int, rule: str = "plain") -> list[dict]:
     """FTS5 prefilter. No embeddings: 10k rows is nothing for FTS.
 
@@ -317,6 +345,18 @@ def shortlist(db: sqlite3.Connection, project: str, top: int, rule: str = "plain
             (query, top)).fetchall()
         return [{"id": r[0], "name": r[1], "desc": r[2], "repo": r[3], "url": r[4],
                  "tier": r[5], "bm25": r[6]} for r in rows]
+
+    if rule == "pool":
+        return _pool_rank(db, informative, dfs, total, top)
+
+    if rule == "hybrid":
+        # Neither rule wins alone: the single OR query keeps the strong multi-word
+        # matches, the pool keeps the rare-word ones the OR query buries. Keep both,
+        # the OR query taking the larger share.
+        head = shortlist(db, project, math.ceil(top * 0.6), rule="plain")
+        seen_ids = {c["id"] for c in head}
+        tail = [c for c in _pool_rank(db, informative, dfs, total, top) if c["id"] not in seen_ids]
+        return (head + tail)[:top]
 
     scores: dict[int, float] = {}
     for w in informative:

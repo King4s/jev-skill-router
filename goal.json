@@ -1,0 +1,36 @@
+{
+  "goal": "Raise the skill-router's shortlist recall on the four-project eval set from 11/15 to 13/15 by changing how candidates are retrieved, without weakening the Jev answer contract, and document the measured ceiling that keeps it away from 15/15.",
+  "acceptance": [
+    "`python3 scripts/eval_shortlist.py --require 13` exits 0: at least 13 of the 15 facit skills survive the top-40 shortlist across the four eval projects",
+    "`python3 router.py selftest` still passes — the answer contract validator and the FTS prefilter are not weakened to reach the target",
+    "The winning retrieval rule is measured against the current one on the same four projects, and the numbers are printed by the harness rather than asserted in prose",
+    "What still cannot be found is written down with the measurement that shows it (the keyword ceiling), not silently left out",
+    "Running `python3 router.py route \"<project>\"` end to end still works and still rejects malformed Jev answers"
+  ],
+  "workdir": ".",
+  "checks": [
+    "python3 router.py selftest",
+    "python3 scripts/eval_shortlist.py --require 13"
+  ],
+
+  "jev_model": "jev-latest",
+  "jev_done_threshold": 0.8,
+  "max_turns": 12,
+  "max_consecutive_failures": 3,
+  "check_timeout": 300,
+
+  "roles": {
+    "build": {
+      "when": "The retrieval rule is unchanged and the shortlist recall check is still failing",
+      "brief": "Change how candidates are retrieved in router.py. Keep the change inside shortlist() and its callers. Do not touch the answer-contract validator or the Jev question shape. Measure every variant with scripts/eval_shortlist.py; do not claim an improvement that the harness does not print."
+    },
+    "fix": {
+      "when": "A check fails with a concrete error message",
+      "brief": "Read the failing check output and fix the root cause with the smallest correct change. Do not weaken a check to make it pass."
+    },
+    "docs": {
+      "when": "The recall target is reached but the ceiling that remains is not written down",
+      "brief": "Update README.md with the measured before/after and the skills that still cannot be found, naming the measurement that shows it. Keep it in English."
+    }
+  }
+}

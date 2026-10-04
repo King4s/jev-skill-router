@@ -66,16 +66,22 @@ def main():
     p.add_argument("--db", default=str(router.DB))
     p.add_argument("--top", type=int, default=40)
     p.add_argument("--show", action="store_true")
+    p.add_argument("--require", type=int, default=None,
+                   help="exit non-zero unless the winning rule reaches this many hits — "
+                        "makes the harness usable as a jev-loop check")
     args = p.parse_args()
     import sqlite3
     db = sqlite3.connect(args.db)
     results = {}
-    for rule in ("plain", "bm25", "idf"):
+    for rule in ("plain", "bm25", "pool", "hybrid", "idf"):
         print(f"\nrule: {rule}")
         results[rule] = run(db, rule, args.top, args.show)
     best = max(results, key=lambda k: results[k])
     print(f"\nwinner: {best} ({results[best]} hits) — keep it as the default in shortlist()")
-    return 0 if results.get("plain", 0) >= results.get("idf", 0) else 1
+    if args.require is not None and results[best] < args.require:
+        print(f"FAIL: need {args.require} hits, best rule reached {results[best]}")
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
