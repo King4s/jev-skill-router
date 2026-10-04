@@ -33,7 +33,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 DB = ROOT / "skills.db"
-SOURCES = ROOT / "sources.txt"
+SOURCES = ROOT / "Skills-list.md"          # vedligeholdes af Grok Bot
 JEV_API = "https://api.typesafe.ai/v1/systemone"
 JEV_MODEL = os.environ.get("JEV_MODEL", "jev-latest")
 KEY_FILE = Path.home() / ".config" / "jev-loop" / "typesafe_api_key"
@@ -83,15 +83,30 @@ def fingerprint(name: str, desc: str) -> str:
 # ---------------------------------------------------------------- kilder
 
 def read_sources(path: Path) -> list[tuple[str, str]]:
-    """-> [(repo, tier)] inkl. tier fra '# N.' sektions-headere."""
-    tier, out = "community", []
-    for line in path.read_text(encoding="utf-8").splitlines():
+    """-> [(repo, tier)]. Læser Grok Bots markdown-liste (Skills-list.md) såvel som
+    en flad owner/repo-fil. Tier kommer fra sektionsnummeret; sektioner uden
+    nummer (fx 'Flagged / excluded') springes over."""
+    text = path.read_text(encoding="utf-8")
+    tier, out, seen = "community", [], set()
+    for line in text.splitlines():
         s = line.strip()
-        m = re.match(r"^#\s*(\d)\.", s)
+        m = re.match(r"^#{2,3}\s*(\d)\.", s)
         if m:
             tier = TIERS.get(m.group(1), "community")
-        elif s and not s.startswith("#") and ":" not in s and "/" in s:
-            out.append((s, tier))
+            continue
+        if s.startswith("##"):
+            tier = None                          # ikke-nummereret sektion = ikke en kilde
+            continue
+        if tier is None:
+            continue
+        for repo in re.findall(r"\]\(https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)\)", s):
+            if repo not in seen:
+                seen.add(repo)
+                out.append((repo, tier))
+        if not s.startswith(("-", "|", "#", ">")) and re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", s):
+            if s not in seen:
+                seen.add(s)
+                out.append((s, tier))
     return out
 
 
@@ -106,13 +121,14 @@ def gh_api(path: str):
         return None
 
 
-def list_skill_paths(repo: str) -> tuple[str, list[str], int]:
-    """(branch, [SKILL.md-stier], stjerner) via ét tree-kald — ingen klon."""
+def list_skill_paths(repo: str) -> tuple[str, list[tuple[str, str]], int]:
+    """(branch, [(sti, blob-sha)], stjerner) via to API-kald — ingen klon.
+    Blob-sha'en er versionsnøglen: uændret sha ⇒ vi kan genbruge cachet frontmatter."""
     meta = gh_api(f"repos/{repo}") or {}
     branch = meta.get("default_branch", "main")
     stars = meta.get("stargazers_count", 0)
     tree = gh_api(f"repos/{repo}/git/trees/{branch}?recursive=1") or {}
-    paths = [e["path"] for e in tree.get("tree", [])
+    paths = [(e["path"], e.get("sha", "")) for e in tree.get("tree", [])
              if e.get("path", "").endswith("SKILL.md") and e.get("type") == "blob"]
     return branch, paths, stars
 
@@ -155,6 +171,8 @@ CREATE INDEX IF NOT EXISTS skills_repo ON skills(repo);
 CREATE VIRTUAL TABLE IF NOT EXISTS skills_fts USING fts5(name, desc, tags);
 CREATE TABLE IF NOT EXISTS sources (repo TEXT PRIMARY KEY, tier TEXT, branch TEXT,
   stars INTEGER, listed INTEGER, truncated INTEGER, note TEXT, seen_at TEXT DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE IF NOT EXISTS fm (repo TEXT, path TEXT, sha TEXT, name TEXT, desc TEXT, tags TEXT,
+  PRIMARY KEY (repo, path));
 """
 
 
@@ -163,9 +181,11 @@ def cmd_index(args) -> int:
     db.executescript(SCHEMA)
     sources = read_sources(Path(args.sources))
     print(f"[index] {len(sources)} kilder fra {args.sources}", flush=True)
+    cache = {(r[0], r[1]): (r[2], r[3], r[4], r[5])
+             for r in db.execute("SELECT repo, path, sha, name, desc, tags FROM fm")}
 
     # 1) find alle SKILL.md-stier (sekventielt — tree-kald er billige, men API'et er rate-limitet)
-    jobs: list[tuple[str, str, str, str, int]] = []
+    jobs: list[tuple[str, str, str, str, int, str]] = []
     for repo, tier in sources:
         branch, paths, stars = list_skill_paths(repo)
         db.execute("INSERT OR REPLACE INTO sources(repo,tier,branch,stars,listed,note) "
@@ -173,13 +193,17 @@ def cmd_index(args) -> int:
                    (repo, tier, branch, stars, len(paths),
                     "no SKILL.md (link-list only)" if not paths else ""))
         print(f"[index]   {len(paths):5d}  {repo}", flush=True)
-        jobs += [(repo, branch, p, tier, stars) for p in paths]
+        jobs += [(repo, branch, p, tier, stars, sha) for p, sha in paths]
     db.commit()
-    print(f"[index] {len(jobs)} SKILL.md at hente", flush=True)
+    print(f"[index] {len(jobs)} SKILL.md i alt", flush=True)
+    meta_of = {(j[0], j[2]): (j[3], j[4], j[1]) for j in jobs}   # (repo,sti) -> (tier, stars, branch)
 
-    # 2) hent frontmatter parallelt
+    # 2) hent frontmatter parallelt; uændret blob-sha genbruges fra cachen
     def pull(job):
-        repo, branch, path, tier, stars = job
+        repo, branch, path, tier, stars, sha = job
+        hit = cache.get((repo, path))
+        if hit and hit[0] == sha and sha:
+            return (repo, path, sha, *hit[1:])
         head = fetch_head(repo, branch, path)
         if not head:
             return None
@@ -187,34 +211,40 @@ def cmd_index(args) -> int:
         name, desc = fm.get("name", "").strip(), fm.get("description", "").strip()
         if not name or not desc:
             return None
-        tags = fm.get("tags", "") or fm.get("metadata", "")
-        url = f"https://github.com/{repo}/blob/{branch}/{path}"
-        return (name, desc, tags, tier, repo, stars, path, url,
-                fingerprint(name, desc))
+        return (repo, path, sha, name, desc, fm.get("tags", "") or fm.get("metadata", ""))
 
-    rows, fetched = [], 0
+    rows, keep, fetched = [], [], 0
     with cf.ThreadPoolExecutor(max_workers=args.workers) as ex:
         for res in ex.map(pull, jobs):
             fetched += 1
             if fetched % 2000 == 0:
-                print(f"[index]   hentet {fetched}/{len(jobs)}", flush=True)
+                print(f"[index]   behandlet {fetched}/{len(jobs)}", flush=True)
             if res:
-                rows.append(res)
+                keep.append(res)
+                repo, path, sha, name, desc, tags = res
+                tier, stars, branch = meta_of[(repo, path)]
+                rows.append((name, desc, tags, tier, repo, stars, path,
+                             f"https://github.com/{repo}/blob/{branch}/{path}",
+                             fingerprint(name, desc)))
+
+    db.executemany("INSERT OR REPLACE INTO fm(repo,path,sha,name,desc,tags) VALUES(?,?,?,?,?,?)",
+                   keep)
 
     # 3) dedupe på fingerprint: første forekomst vinder, kopier noteres som dup_of
     seen: dict[str, int] = {}
-    for row in rows:
-        fp = row[-1]
+    for name, desc, tags, tier, repo, stars, path, url, fp in rows:
         if fp in seen:
             db.execute("INSERT OR IGNORE INTO skills(name,desc,tags,tier,repo,stars,path,url,fp,dup_of)"
-                       " VALUES(?,?,?,?,?,?,?,?,?,?)", (*row, seen[fp]))
+                       " VALUES(?,?,?,?,?,?,?,?,?,?)", (name, desc, tags, tier, repo, stars,
+                                                        path, url, fp, seen[fp]))
             continue
         cur = db.execute("INSERT OR IGNORE INTO skills(name,desc,tags,tier,repo,stars,path,url,fp)"
-                         " VALUES(?,?,?,?,?,?,?,?,?)", row)
+                         " VALUES(?,?,?,?,?,?,?,?,?)",
+                         (name, desc, tags, tier, repo, stars, path, url, fp))
         if cur.rowcount:
             seen[fp] = cur.lastrowid
             db.execute("INSERT INTO skills_fts(rowid,name,desc,tags) VALUES(?,?,?,?)",
-                       (cur.lastrowid, row[0], row[1], row[2]))
+                       (cur.lastrowid, name, desc, tags))
     db.commit()
 
     uniq = db.execute("SELECT COUNT(*) FROM skills WHERE dup_of IS NULL").fetchone()[0]

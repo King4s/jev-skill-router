@@ -42,7 +42,7 @@ full result including rejected answers.
 
 | Command | Does |
 |---|---|
-| `router.py index` | Harvests frontmatter from every repo in `sources.txt`, dedupes, rebuilds FTS5 |
+| `router.py index` | Harvests frontmatter from every repo in `Skills-list.md`, dedupes, rebuilds FTS5 |
 | `router.py stats` | Counts per tier and repo; lists sources carrying no skills |
 | `router.py route "<text>"` | FTS5 shortlist → one Jev call → ranked skills |
 | `router.py selftest` | Asserts frontmatter folding, dedupe, FTS5 and the answer contract |

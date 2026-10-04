@@ -9,23 +9,27 @@ Kode finder kandidater, Jev dømmer dem. 15.000+ skills kan ikke være ét Jev-s
 så FTS5 laver shortlisten, og Jev rangerer den med `Score` + kalibreret confidence.
 
 ```
-sources.txt ──► index ──► skills.db (SQLite FTS5) ──► route ──► rangliste
-              GitHub API     15k rækker, 0 deps        FTS5-prefilter
-                                                       └─► Jev: ét kald, Score pr. kandidat
+Skills-list.md ──► index ──► skills.db (SQLite FTS5) ──► route ──► rangliste
+              GitHub API     17k rækker, 0 deps          FTS5-prefilter
+                                                          └─► Jev: ét kald, Score pr. kandidat
 ```
 
 ## Målt på første kørsel (2026-10-04)
 
 | | |
 |---|---|
-| Kilder i `sources.txt` | 78 rækker (76 GitHub-repos + 2 GitLab/HF) |
-| Repos der bærer `SKILL.md` | 63 |
-| Repos uden (rene link-lister) | 14 — se *Fase 2* |
-| `SKILL.md` fundet via tree-API | **15.642** |
-| Stjernetallene i oversigten | bekræftet ægte mod GitHub-API'et |
+| Kilder i `Skills-list.md` | 98 (34 vendor, 21 tooling, 19 community, 16 list, 8 registry) |
+| Repos der bærer `SKILL.md` | ~75 |
+| Repos uden (rene link-lister) | se *Fase 2* |
+| `SKILL.md` fundet via tree-API | **~17.000** |
+| Stjernetallene i listen | bekræftet ægte mod GitHub-API'et |
 
 Ingen kloning: hvert repo koster to API-kald (`repos/<r>` + `trees?recursive=1`), og hver
 skill hentes som de første 4 KB af rå-filen — frontmatter er alt routeren bruger.
+
+**Genindeksering er inkrementel.** Blob-sha'en fra tree-API'et er versionsnøgle: er den
+uændret, genbruges det cachede frontmatter fra `fm`-tabellen uden et netkald. Første kørsel
+henter alt; efterfølgende kørsler henter kun det Grok Bot har føjet til.
 
 ## Brug
 
@@ -51,13 +55,14 @@ kilder der bærer den.
 
 ## Kilde-tiers
 
-`sources.txt` er sektionsopdelt, og sektionsnummeret bliver til en tier:
+`Skills-list.md` er sektionsopdelt, og sektionsnummeret bliver til en tier:
 `vendor` (officielle firma-repos), `community`, `list` (awesome-lister),
-`registry`, `tooling`, `gitlab`. Tieren følger med i ranglisten, så et `vendor`-hit
-kan foretrækkes over et community-hit ved samme score.
+`registry`, `tooling`. Tieren følger med i ranglisten, så et `vendor`-hit kan
+foretrækkes over et community-hit ved samme score.
 
-**Grok Bot vedligeholder `sources.txt`.** Tilføj en linje `owner/repo` i den rigtige
-sektion — routeren læser filen, ingen kodeændring nødvendig.
+**Grok Bot vedligeholder `Skills-list.md`.** Tilføj en linje eller en tabelrække med et
+`github.com/owner/repo`-link i den rigtige sektion — routeren læser filen, ingen
+kodeændring nødvendig. Sektioner uden nummer (fx *Flagged / excluded*) ignoreres med vilje.
 
 ## Svarkontrakten håndhæves
 
