@@ -166,9 +166,10 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS skills (
   id INTEGER PRIMARY KEY, name TEXT, desc TEXT, tags TEXT, tier TEXT, repo TEXT,
   stars INTEGER, path TEXT, url TEXT, fp TEXT, dup_of INTEGER, seen_at TEXT DEFAULT CURRENT_TIMESTAMP);
-CREATE UNIQUE INDEX IF NOT EXISTS skills_fp ON skills(fp);
 CREATE INDEX IF NOT EXISTS skills_repo ON skills(repo);
 CREATE VIRTUAL TABLE IF NOT EXISTS skills_fts USING fts5(name, desc, tags);
+DROP INDEX IF EXISTS skills_fp;               -- var UNIQUE: gjorde dubletter umulige at gemme
+CREATE INDEX IF NOT EXISTS skills_fp ON skills(fp);
 CREATE TABLE IF NOT EXISTS sources (repo TEXT PRIMARY KEY, tier TEXT, branch TEXT,
   stars INTEGER, listed INTEGER, truncated INTEGER, note TEXT, seen_at TEXT DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS fm (repo TEXT, path TEXT, sha TEXT, name TEXT, desc TEXT, tags TEXT,
@@ -231,6 +232,8 @@ def cmd_index(args) -> int:
                    keep)
 
     # 3) dedupe på fingerprint: første forekomst vinder, kopier noteres som dup_of
+    db.execute("DELETE FROM skills")
+    db.execute("DELETE FROM skills_fts")
     seen: dict[str, int] = {}
     for name, desc, tags, tier, repo, stars, path, url, fp in rows:
         if fp in seen:
@@ -277,8 +280,11 @@ def cmd_stats(args) -> int:
 # ---------------------------------------------------------------- route
 
 def shortlist(db: sqlite3.Connection, project: str, top: int) -> list[dict]:
-    """FTS5 BM25-prefilter. Ingen embeddings: 15k rækker er ingenting for FTS."""
-    words = [w for w in re.findall(r"[A-Za-zÆØÅæøå0-9][A-Za-zÆØÅæøå0-9_-]{2,}", project)][:40]
+    """FTS5 BM25-prefilter. Ingen embeddings: 10k rækker er ingenting for FTS.
+    Tokenisering matcher FTS5's egen (unicode61): bindestreg og underscore deler,
+    ellers dør sammensatte ord som 'MCP-tjeneste' og 'FTS5-indeks' på df=0."""
+    raw = re.findall(r"[^\W_]+", project, re.UNICODE)
+    words = list(dict.fromkeys(w for w in raw if len(w) >= 2 and not w.isdigit()))[:40]
     if not words:
         return []
     query = " OR ".join(f'"{w}"' for w in words)
