@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-"""Eval: finder shortlisten de skills vi VED er rigtige?
+"""Eval: does the shortlist find the skills we KNOW belong there?
 
-Fire projekter med en facit-liste. To af dem er Marcis egne (OpenCorde, Tilbud),
-to er kontroller hvor svaret er indlysende (Minecraft, routeren selv).
-Kør efter enhver ændring af shortlist-reglen:
+Four projects with a hand-written facit list. Two are Marcin's own (OpenCorde,
+Tilbud 2.0), two are controls where the answer is obvious (Minecraft server, the
+router itself). Run after any change to the shortlist rule:
 
-  python3 scripts/eval_shortlist.py            # hit@40 pr. regel
-  python3 scripts/eval_shortlist.py --show     # og hvad der kom med i stedet
+  python3 scripts/eval_shortlist.py             # hits@40 per rule
+  python3 scripts/eval_shortlist.py --show      # and what came in instead
 
-Ceiling: facit-listerne er mine, ikke målt mod en uafhængig dommer. De fanger
-"forsvandt den helt", ikke "er rækkefølgen god" — rækkefølgen dømmer Jev.
+Ceiling: the facit lists are mine, not measured against an independent judge.
+They catch "the right skill vanished", not "the order is sensible" — recall is
+the cheap half; the ordering is Jev's job.
 """
 import argparse
 import sys
@@ -51,12 +52,12 @@ def run(db, rule, top=40, show=False):
         hits = [w for w in want if w in got]
         total_hit += len(hits)
         total_want += len(want)
-        flag = "" if len(hits) == len(want) else "   <-- mangler: " + ", ".join(
+        flag = "" if len(hits) == len(want) else "   <-- missing: " + ", ".join(
             w for w in want if w not in got)
         print(f"  {name:10} {len(hits)}/{len(want)}  {hits}{flag}")
         if show and flag:
-            print("             i stedet: " + ", ".join(got[:8]))
-    print(f"  {'I ALT':10} {total_hit}/{total_want}  ({total_hit / total_want:.0%})")
+            print("             instead: " + ", ".join(got[:8]))
+    print(f"  {'TOTAL':10} {total_hit}/{total_want}  ({total_hit / total_want:.0%})")
     return total_hit
 
 
@@ -70,11 +71,11 @@ def main():
     db = sqlite3.connect(args.db)
     results = {}
     for rule in ("plain", "bm25", "idf"):
-        print(f"\nregel: {rule}")
+        print(f"\nrule: {rule}")
         results[rule] = run(db, rule, args.top, args.show)
-    best = max(results, key=results.get)
-    print(f"\nvinder: {best} ({results[best]} hits) — sæt den som default i shortlist()")
-    return 0 if results.get("idf", 0) >= results.get("bm25", 0) else 1
+    best = max(results, key=lambda k: results[k])
+    print(f"\nwinner: {best} ({results[best]} hits) — keep it as the default in shortlist()")
+    return 0 if results.get("plain", 0) >= results.get("idf", 0) else 1
 
 
 if __name__ == "__main__":

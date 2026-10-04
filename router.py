@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
-"""Jev Skill Router — ÉN fil: høst skill-frontmatter fra kilderepos, indeksér i
-SQLite FTS5, lad Jev rangere de bedste kandidater for et projekt.
+"""Jev Skill Router — one file: harvest skill frontmatter from source repos,
+index it in SQLite FTS5, and let Jev rank the best candidates for a project.
 
-Hvorfor det er delt sådan:
-  * Kode finder kandidaterne (SQLite FTS5, stdlib, ingen embeddings, ingen deps).
-  * Jev dømmer kandidaterne (Score pr. skill, ét kald, fan-out).
-  15.642 skills kan ikke være ét Jev-spørgsmål. Jev er dommer, ikke indeks.
+Why it is split this way:
+  * Code finds the candidates (SQLite FTS5, stdlib, no embeddings, no deps).
+  * Jev judges the candidates (one Score per skill, one call, fan-out).
+  10.000+ skills cannot be a single Jev question. Jev is the judge, not the index.
 
-Brug:
-  python3 router.py index                    # byg/opdatér indekset
-  python3 router.py stats                    # hvad ligger der
-  python3 router.py route "beskriv projektet" # rangér kandidater med Jev
-  python3 router.py selftest                 # offline check af logikken
+Usage:
+  python3 router.py index                     # build/refresh the index
+  python3 router.py stats                     # what is in it
+  python3 router.py route "describe project"  # rank candidates with Jev
+  python3 router.py selftest                  # offline check of the logic
 
-Kræver: gh (autentificeret) til index; TYPESAFE_API_KEY (eller
-~/.config/jev-loop/typesafe_api_key) til route.
+Needs: gh (authenticated) for index; TYPESAFE_API_KEY (or
+~/.config/jev-loop/typesafe_api_key) for route.
 """
 from __future__ import annotations
 
@@ -34,14 +34,14 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 DB = ROOT / "skills.db"
-SOURCES = ROOT / "Skills-list.md"          # vedligeholdes af Grok Bot
+SOURCES = ROOT / "Skills-list.md"          # maintained by Grok Bot
 JEV_API = "https://api.typesafe.ai/v1/systemone"
 JEV_MODEL = os.environ.get("JEV_MODEL", "jev-latest")
 KEY_FILE = Path.home() / ".config" / "jev-loop" / "typesafe_api_key"
-FM_BYTES = 4096          # frontmatter lever i filens første KB'er
+FM_BYTES = 4096          # frontmatter lives in the first few KB of the file
 TIERS = {"1": "vendor", "2": "community", "3": "list", "4": "registry", "5": "tooling", "6": "gitlab"}
 
-# Score-niveauer: situationer, ikke grader (docs.typesafe.ai/primitives/score).
+# Score levels: situations, not degrees (docs.typesafe.ai/primitives/score).
 LEVELS = [
     "Irrelevant for this project — nothing in it applies",
     "Background — useful context for understanding the domain, not needed to build",
@@ -53,7 +53,7 @@ LEVELS = [
 # ---------------------------------------------------------------- frontmatter
 
 def _fold(v: str) -> str:
-    """YAML-folded scalar: > og | blokke klemmes til én linje."""
+    """YAML folded scalar: > and | blocks collapse onto one line."""
     return re.sub(r"\s+", " ", v).strip().strip('"\'')
 
 
@@ -67,26 +67,26 @@ def parse_frontmatter(text: str) -> dict:
         if re.match(r"^[A-Za-z_][A-Za-z0-9_-]*:", line):
             key, _, val = line.partition(":")
             key = key.strip()
-            if val.strip() in {">", ">-", ">+", "|", "|-", "|+"}:   # blok-scalar starter
+            if val.strip() in {">", ">-", ">+", "|", "|-", "|+"}:   # block scalar starts
                 val = ""
             out[key] = _fold(val)
-        elif key and line.strip():                      # fortsat blok-scalar
+        elif key and line.strip():                      # continuation of a block scalar
             out[key] = _fold(out.get(key, "") + " " + line)
     return out
 
 
 def fingerprint(name: str, desc: str) -> str:
-    """Samme skill kopieret ind i 5 awesome-lister skal tælle én gang."""
+    """The same skill copied into five awesome-lists must count once."""
     norm = re.sub(r"[^a-z0-9 ]", "", f"{name} {desc}".lower())
     return hashlib.sha1(re.sub(r"\s+", " ", norm).encode()).hexdigest()
 
 
-# ---------------------------------------------------------------- kilder
+# ---------------------------------------------------------------- sources
 
 def read_sources(path: Path) -> list[tuple[str, str]]:
-    """-> [(repo, tier)]. Læser Grok Bots markdown-liste (Skills-list.md) såvel som
-    en flad owner/repo-fil. Tier kommer fra sektionsnummeret; sektioner uden
-    nummer (fx 'Flagged / excluded') springes over."""
+    """-> [(repo, tier)]. Reads Grok Bot's markdown list (Skills-list.md) as well as
+    a flat owner/repo file. The tier comes from the section number; sections without
+    a number (e.g. 'Flagged / excluded') are skipped."""
     text = path.read_text(encoding="utf-8")
     tier, out, seen = "community", [], set()
     for line in text.splitlines():
@@ -96,7 +96,7 @@ def read_sources(path: Path) -> list[tuple[str, str]]:
             tier = TIERS.get(m.group(1), "community")
             continue
         if s.startswith("##"):
-            tier = None                          # ikke-nummereret sektion = ikke en kilde
+            tier = None                          # unnumbered section = not a source
             continue
         if tier is None:
             continue
@@ -123,8 +123,8 @@ def gh_api(path: str):
 
 
 def list_skill_paths(repo: str) -> tuple[str, list[tuple[str, str]], int]:
-    """(branch, [(sti, blob-sha)], stjerner) via to API-kald — ingen klon.
-    Blob-sha'en er versionsnøglen: uændret sha ⇒ vi kan genbruge cachet frontmatter."""
+    """(branch, [(path, blob sha)], stars) via two API calls — no clone.
+    The blob sha is the version key: an unchanged sha means cached frontmatter can be reused."""
     meta = gh_api(f"repos/{repo}") or {}
     branch = meta.get("default_branch", "main")
     stars = meta.get("stargazers_count", 0)
@@ -135,7 +135,7 @@ def list_skill_paths(repo: str) -> tuple[str, list[tuple[str, str]], int]:
 
 
 def fetch_head(repo: str, branch: str, path: str) -> str | None:
-    """Kun de første KB'er af filen — frontmatter er alt vi skal bruge."""
+    """Only the first few KB of the file — the frontmatter is all we need."""
     url = f"https://raw.githubusercontent.com/{repo}/{branch}/{path}"
     req = urllib.request.Request(url, headers={
         "Range": f"bytes=0-{FM_BYTES - 1}", "User-Agent": "jev-skill-router"})
@@ -144,7 +144,7 @@ def fetch_head(repo: str, branch: str, path: str) -> str | None:
             with urllib.request.urlopen(req, timeout=20) as r:
                 return r.read(FM_BYTES).decode("utf-8", "replace")
         except urllib.error.HTTPError as e:
-            if e.code == 416:                            # filen er kortere end rangen
+            if e.code == 416:                            # file is shorter than the range
                 try:
                     return urllib.request.urlopen(
                         urllib.request.Request(url, headers={"User-Agent": "jev-skill-router"}),
@@ -169,7 +169,7 @@ CREATE TABLE IF NOT EXISTS skills (
   stars INTEGER, path TEXT, url TEXT, fp TEXT, dup_of INTEGER, seen_at TEXT DEFAULT CURRENT_TIMESTAMP);
 CREATE INDEX IF NOT EXISTS skills_repo ON skills(repo);
 CREATE VIRTUAL TABLE IF NOT EXISTS skills_fts USING fts5(name, desc, tags);
-DROP INDEX IF EXISTS skills_fp;               -- var UNIQUE: gjorde dubletter umulige at gemme
+DROP INDEX IF EXISTS skills_fp;               -- was UNIQUE: made duplicate rows impossible to store
 CREATE INDEX IF NOT EXISTS skills_fp ON skills(fp);
 CREATE TABLE IF NOT EXISTS sources (repo TEXT PRIMARY KEY, tier TEXT, branch TEXT,
   stars INTEGER, listed INTEGER, truncated INTEGER, note TEXT, seen_at TEXT DEFAULT CURRENT_TIMESTAMP);
@@ -182,11 +182,11 @@ def cmd_index(args) -> int:
     db = sqlite3.connect(args.db)
     db.executescript(SCHEMA)
     sources = read_sources(Path(args.sources))
-    print(f"[index] {len(sources)} kilder fra {args.sources}", flush=True)
+    print(f"[index] {len(sources)} sources from {args.sources}", flush=True)
     cache = {(r[0], r[1]): (r[2], r[3], r[4], r[5])
              for r in db.execute("SELECT repo, path, sha, name, desc, tags FROM fm")}
 
-    # 1) find alle SKILL.md-stier (sekventielt — tree-kald er billige, men API'et er rate-limitet)
+    # 1) find every SKILL.md path (sequentially — tree calls are cheap, the API is rate limited)
     jobs: list[tuple[str, str, str, str, int, str]] = []
     for repo, tier in sources:
         branch, paths, stars = list_skill_paths(repo)
@@ -197,10 +197,10 @@ def cmd_index(args) -> int:
         print(f"[index]   {len(paths):5d}  {repo}", flush=True)
         jobs += [(repo, branch, p, tier, stars, sha) for p, sha in paths]
     db.commit()
-    print(f"[index] {len(jobs)} SKILL.md i alt", flush=True)
-    meta_of = {(j[0], j[2]): (j[3], j[4], j[1]) for j in jobs}   # (repo,sti) -> (tier, stars, branch)
+    print(f"[index] {len(jobs)} SKILL.md in total", flush=True)
+    meta_of = {(j[0], j[2]): (j[3], j[4], j[1]) for j in jobs}   # (repo, path) -> (tier, stars, branch)
 
-    # 2) hent frontmatter parallelt; uændret blob-sha genbruges fra cachen
+    # 2) fetch frontmatter in parallel; an unchanged blob sha is reused from the cache
     def pull(job):
         repo, branch, path, tier, stars, sha = job
         hit = cache.get((repo, path))
@@ -220,7 +220,7 @@ def cmd_index(args) -> int:
         for res in ex.map(pull, jobs):
             fetched += 1
             if fetched % 2000 == 0:
-                print(f"[index]   behandlet {fetched}/{len(jobs)}", flush=True)
+                print(f"[index]   processed {fetched}/{len(jobs)}", flush=True)
             if res:
                 keep.append(res)
                 repo, path, sha, name, desc, tags = res
@@ -232,7 +232,7 @@ def cmd_index(args) -> int:
     db.executemany("INSERT OR REPLACE INTO fm(repo,path,sha,name,desc,tags) VALUES(?,?,?,?,?,?)",
                    keep)
 
-    # 3) dedupe på fingerprint: første forekomst vinder, kopier noteres som dup_of
+    # 3) dedupe on fingerprint: the first occurrence wins, copies are recorded as dup_of
     db.execute("DELETE FROM skills")
     db.execute("DELETE FROM skills_fts")
     seen: dict[str, int] = {}
@@ -255,7 +255,7 @@ def cmd_index(args) -> int:
     dups = db.execute("SELECT COUNT(*) FROM skills WHERE dup_of IS NOT NULL").fetchone()[0]
     db.execute("INSERT INTO skills_fts(skills_fts) VALUES('optimize')")
     db.commit()
-    print(f"[index] færdig: {uniq} unikke skills, {dups} dubletter filtreret fra")
+    print(f"[index] done: {uniq} unique skills, {dups} duplicates filtered out")
     return 0
 
 
@@ -263,16 +263,16 @@ def cmd_stats(args) -> int:
     db = sqlite3.connect(args.db)
     q = db.execute
     total, uniq = q("SELECT COUNT(*), SUM(dup_of IS NULL) FROM skills").fetchone()
-    print(f"indeks: {args.db}  ({total} rækker, {uniq} unikke, {total - uniq} dubletter)")
-    print("\npr. tier (unikke):")
+    print(f"index: {args.db}  ({total} rows, {uniq} unique, {total - uniq} duplicates)")
+    print("\nper tier (unique):")
     for tier, n in q("SELECT tier, COUNT(*) FROM skills WHERE dup_of IS NULL "
                      "GROUP BY tier ORDER BY 2 DESC"):
         print(f"  {n:6d}  {tier}")
-    print("\ntop 10 repos (unikke):")
+    print("\ntop 10 repos (unique):")
     for repo, n in q("SELECT repo, COUNT(*) FROM skills WHERE dup_of IS NULL "
                      "GROUP BY repo ORDER BY 2 DESC LIMIT 10"):
         print(f"  {n:6d}  {repo}")
-    print("\nkilder uden SKILL.md (link-lister, fase 2):")
+    print("\nsources with no SKILL.md (link lists, phase 2):")
     for repo, note in q("SELECT repo, note FROM sources WHERE listed=0 ORDER BY repo"):
         print(f"    {repo}  ({note})")
     return 0
@@ -281,22 +281,20 @@ def cmd_stats(args) -> int:
 # ---------------------------------------------------------------- route
 
 def shortlist(db: sqlite3.Connection, project: str, top: int, rule: str = "plain") -> list[dict]:
-    """FTS5-prefilter. Ingen embeddings: 10k rækker er ingenting for FTS.
+    """FTS5 prefilter. No embeddings: 10k rows is nothing for FTS.
 
-    To regler, målt mod hinanden i scripts/eval_shortlist.py:
-    * "bm25" — én OR-forespørgsel, rangeret af FTS5's bm25. Fylder listen med
-      dokumenter der matcher mange *almindelige* ord: engelsk prosa ('and', 'use',
-      'to') findes i næsten hver skill-beskrivelse, så funktionsord dominerer.
-      Målt: 'just-scrape' matchede 9 af Tilbud-beskrivelsens ord, hvoraf 8 var
-      funktionsord — og 'llm-evaluation', den substantivt rigtige skill, lå #248.
-    * "idf" — hvert ord slås op for sig, og et dokument scorer summen af
-      log(total/df) for de ord den matcher. **Målt dårligere (5/15 mod 11/15)**:
-      et enkelt ultra-sjældent ord ('friends', 'seventeen') vejer så tungt at
-      støjord slår dokumenter der matcher flere relevante ord. Beholdt kun fordi
-      eval-harnesset skal kunne måle den igen — den er ikke i brug.
+    Two rules, measured against each other in scripts/eval_shortlist.py:
+    * "plain" — one OR query, ranked by FTS5's bm25. Also has a variant that
+      drops words with df > 30% of the corpus; measured identical on all four
+      eval cases, so the filter buys nothing and is not the default.
+    * "idf" — each word is looked up on its own and a document scores the sum of
+      log(total/df) for the words it matches. **Measured worse (5/15 vs 11/15)**:
+      one ultra-rare word ('friends', 'seventeen') weighs so much that noise beats
+      documents matching several relevant words. Kept only so the eval harness can
+      measure it again — it is not in use.
 
-    Tokeniseringen matcher FTS5's egen (unicode61), ellers får sammensatte ord som
-    'MCP-tjeneste' df=0 og falder ud af begge regler."""
+    Tokenisation matches FTS5's own (unicode61); otherwise compound words like
+    'MCP-service' get df=0 and fall out of both rules."""
     raw = re.findall(r"[^\W_]+", project, re.UNICODE)
     words = list(dict.fromkeys(w for w in raw if len(w) >= 2 and not w.isdigit()))[:40]
     if not words:
@@ -305,7 +303,7 @@ def shortlist(db: sqlite3.Connection, project: str, top: int, rule: str = "plain
 
     dfs = {w: db.execute("SELECT COUNT(*) FROM skills_fts WHERE skills_fts MATCH ?",
                          (f'"{w}"',)).fetchone()[0] for w in words}
-    if rule == "plain":                      # ingen df-filtrering overhovedet
+    if rule == "plain":                      # no df filtering at all
         informative = words
     else:
         informative = [w for w in words if 0 < dfs[w] < 0.30 * total] or words
@@ -343,7 +341,7 @@ def jev_key() -> str:
     if not key and KEY_FILE.exists():
         key = KEY_FILE.read_text(encoding="utf-8").strip()
     if not key:
-        sys.exit(f"Ingen TypeSafe-nøgle: sæt TYPESAFE_API_KEY eller skriv den til {KEY_FILE}.")
+        sys.exit(f"No TypeSafe key: set TYPESAFE_API_KEY or write it to {KEY_FILE}.")
     return key
 
 
@@ -360,32 +358,32 @@ def jev_call(state: dict, questions: dict, retries: int = 3) -> dict:
             last = f"HTTP {e.code}: {e.read()[:300]!r}"
             if e.code in (429, 529) and attempt < retries:
                 continue
-        except Exception as e:                                   # netværk/timeout
+        except Exception as e:                                   # network / timeout
             last = repr(e)
             if attempt < retries:
                 continue
-    raise RuntimeError(f"Jev utilgængelig: {last}")
+    raise RuntimeError(f"Jev unreachable: {last}")
 
 
 def validate_score(ans: dict, levels: int) -> str | None:
-    """Håndhæv svarkontrakten hårdt. Returnerer fejltekst eller None.
-    Type-sikkerhed der ikke håndhæves er kun kosmetisk."""
+    """Enforce the answer contract hard. Returns an error string, or None.
+    Type safety that is not enforced is only cosmetic."""
     if ans.get("type") != "score":
-        return f"forkert type: {ans.get('type')!r}"
+        return f"wrong type: {ans.get('type')!r}"
     try:
         score, conf = float(ans["score"]), float(ans["confidence"])
     except (KeyError, TypeError, ValueError):
-        return "mangler score/confidence"
+        return "missing score/confidence"
     probs = ans.get("probabilities") or {}
     if set(probs) != {str(i) for i in range(levels)}:
-        return f"nøgler matcher ikke niveauerne: {sorted(probs)}"
+        return f"keys do not match the levels: {sorted(probs)}"
     vals = [float(v) for v in probs.values()]
     if not all(0.0 <= v <= 1.0 for v in vals):
-        return "sandsynlighed uden for [0,1]"
+        return "probability outside [0,1]"
     if abs(sum(vals) - 1.0) > 0.02:
-        return f"sum {sum(vals):.3f} ≠ 1"
+        return f"sum {sum(vals):.3f} != 1"
     if not (0.0 <= score <= levels - 1) or not (0.0 <= conf <= 1.0):
-        return f"score/confidence ude af interval: {score}, {conf}"
+        return f"score/confidence out of range: {score}, {conf}"
     return None
 
 
@@ -393,9 +391,9 @@ def cmd_route(args) -> int:
     db = sqlite3.connect(args.db)
     cands = shortlist(db, args.project, args.top)
     if not cands:
-        print("Ingen kandidater — er indekset bygget? (`router.py stats`)")
+        print("No candidates — is the index built? (`router.py stats`)")
         return 1
-    print(f"[route] {len(cands)} kandidater fra FTS5, sender til Jev ({JEV_MODEL})", flush=True)
+    print(f"[route] {len(cands)} candidates from FTS5, sending to Jev ({JEV_MODEL})", flush=True)
 
     state = {"project": {"spec": args.project},
              "note": "Pick the level that matches how the candidate applies to THIS project."}
@@ -430,12 +428,12 @@ def cmd_route(args) -> int:
     for r in ranked[:args.show]:
         print(f"{r['score']:5.2f} {r['confidence']:5.2f}  {r['name']}  [{r['tier']}] {r['repo']}")
     if rejected:
-        print(f"\n{len(rejected)} svar dumpet på kontrakt-brud "
-              f"(første: {rejected[0]['name']}: {rejected[0]['error']})")
+        print(f"\n{len(rejected)} answers dropped on contract breach "
+              f"(first: {rejected[0]['name']}: {rejected[0]['error']})")
     if args.out:
         Path(args.out).write_text(json.dumps({"project": args.project, "ranked": ranked,
                                              "rejected": rejected}, indent=1, ensure_ascii=False))
-        print(f"\nskrevet: {args.out}")
+        print(f"\nwritten: {args.out}")
     return 0
 
 
@@ -443,29 +441,29 @@ def cmd_route(args) -> int:
 
 def cmd_selftest(args) -> int:
     assert parse_frontmatter("---\nname: pdf\ndescription: >\n  Read PDFs.\n  Also merge.\n---\n# x") \
-        == {"name": "pdf", "description": "Read PDFs. Also merge."}, "frontmatter-fold fejler"
+        == {"name": "pdf", "description": "Read PDFs. Also merge."}, "frontmatter folding fails"
     assert parse_frontmatter("no frontmatter here") == {}
     assert parse_frontmatter('---\nname: a\ndescription: "Quoted desc."\n---\n')["description"] \
         == "Quoted desc."
-    assert fingerprint("PDF", "Read PDFs.") == fingerprint("pdf", "read  pdfs"), "dedupe normalisering"
+    assert fingerprint("PDF", "Read PDFs.") == fingerprint("pdf", "read  pdfs"), "dedupe normalisation"
     assert fingerprint("pdf", "Read PDFs.") != fingerprint("pdf", "Write PDFs.")
-    assert read_sources(Path(args.sources))[:1] == [("anthropics/skills", "vendor")], "tier-parsing"
+    assert read_sources(Path(args.sources))[:1] == [("anthropics/skills", "vendor")], "tier parsing"
 
     db = sqlite3.connect(":memory:")
     db.executescript(SCHEMA)
     db.execute("INSERT INTO skills(id,name,desc,tags,tier,repo) VALUES(1,'pdf','Read and merge PDF files','docs','vendor','x/y')")
     db.execute("INSERT INTO skills_fts(rowid,name,desc,tags) VALUES(1,'pdf','Read and merge PDF files','docs')")
     hit = shortlist(db, "merge PDF files", 5)
-    assert [h["name"] for h in hit] == ["pdf"], f"FTS-prefilter fejler: {hit}"
+    assert [h["name"] for h in hit] == ["pdf"], f"FTS prefilter fails: {hit}"
 
     good = {"type": "score", "score": 2.4, "confidence": 0.7,
             "probabilities": {"0": 0.0, "1": 0.1, "2": 0.4, "3": 0.5}}
-    assert validate_score(good, 4) is None, "gyldigt svar afvist"
+    assert validate_score(good, 4) is None, "a valid answer was rejected"
     assert validate_score({**good, "probabilities": {"0": 0.5, "1": 0.5}}, 4)
     assert validate_score({**good, "score": 9}, 4)
     assert validate_score({**good, "probabilities": {"0": 0.0, "1": 0.2, "2": 0.2, "3": 0.2}}, 4)
     assert validate_score({"type": "noul", "noul": 0.9}, 4)
-    print("selftest: alle checks bestået")
+    print("selftest: all checks passed")
     return 0
 
 

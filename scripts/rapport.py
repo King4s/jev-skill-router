@@ -1,29 +1,29 @@
 #!/usr/bin/env python3
-"""Bygger HTML-rapporten fra route-JSON'erne. Rå data bliver liggende ved siden
-af, så rapporten kan genskabes uden at kalde Jev igen:
+"""Build the HTML report from the route JSON files. The raw data stays next to it,
+so the report can be regenerated without calling Jev again:
 
-  python3 router.py route "<beskrivelse>" --out <dir>/<navn>.json   # pr. projekt
-  python3 scripts/rapport.py --dir <dir>                            # -> rapport.html
+  python3 router.py route "<description>" --out <dir>/<name>.json    # per project
+  python3 scripts/rapport.py --dir <dir>                             # -> rapport.html
 
-Alle tal læses fra filerne; intet er skrevet ind i HTML'en."""
+Every number is read from the files; nothing is written into the HTML."""
 import argparse
 import html
 import json
 from pathlib import Path
 
-# facit pr. projekt: hvilke skills VED vi hører hjemme i toppen (min liste, ikke en dommer)
+# facit per project: the skills we KNOW belong in the top (my list, not a judge's)
 FACIT = {
     "minecraft": (["minecraft-modpack-server", "minecraft-server-admin", "minecraft-modding"],
-                  "Modded Minecraft-server til venner"),
+                  "Modded Minecraft server for friends"),
     "opencorde": (["sveltekit", "rust-sqlx-postgres-service", "qa/e2e-playwright",
                    "identity-federation"],
-                  "OpenCorde — Discord-paritet (Rust + SvelteKit + LiveKit)"),
+                  "OpenCorde — Discord parity (Rust + SvelteKit + LiveKit)"),
     "tilbud": (["llm-evaluation", "rust-sqlx-postgres-service", "systemd-services",
                 "web-scraping"],
-               "Tilbud 2.0 — dansk tilbudsavis-ingest og LLM-klassificering"),
+               "Tilbud 2.0 — Danish offer-catalog ingest and LLM classification"),
     "router": (["rust-mcp-server-generator", "sqlite-storage", "rust-deployable-service",
                 "fastmcp"],
-               "Jev Skill Router selv — Rust MCP over SQLite FTS5"),
+               "The Jev Skill Router itself — Rust MCP over SQLite FTS5"),
 }
 TIER_COLOR = {"vendor": "var(--ok, #3fa66a)", "community": "var(--accent, #6aa9ff)",
               "list": "var(--muted-foreground)", "registry": "var(--muted-foreground)",
@@ -31,7 +31,7 @@ TIER_COLOR = {"vendor": "var(--ok, #3fa66a)", "community": "var(--accent, #6aa9f
 
 
 def bar(score: float, conf: float) -> str:
-    """Score 0-3 som længde, confidence som gennemsigtighed i den ydre bjælke."""
+    """Score 0-3 as bar length, confidence as opacity of the inner fill."""
     w = max(0.0, min(1.0, score / 3)) * 100
     return (f'<span class="bar"><span class="fill" style="width:{w:.0f}%;'
             f'opacity:{0.35 + 0.65 * conf:.2f}"></span></span>')
@@ -70,9 +70,9 @@ def main() -> int:
         miss = [w for w in want if w not in got]
         cards.append(f"""<section class="card">
 <h3>{html.escape(label)}</h3>
-<p class="verd">Fandt <b>{len(hits)} af {len(want)}</b> facit-skills i top-40.
-{'<span class="miss">Mangler: ' + html.escape(', '.join(miss)) + '</span>' if miss else '<span class="ok">Alle facit-skills fundet</span>'}
-{'· ' + str(len(rejected)) + ' svar dumpet på kontrakt-brud' if rejected else ''}</p>
+<p class="verd">Found <b>{len(hits)} of {len(want)}</b> facit skills in the top 40.
+{'<span class="miss">Missing: ' + html.escape(', '.join(miss)) + '</span>' if miss else '<span class="ok">All facit skills found</span>'}
+{'· ' + str(len(rejected)) + ' answers dropped on contract breach' if rejected else ''}</p>
 <table>{''.join(rows)}</table></section>""")
 
     rules = json.loads((d / "regler.json").read_text()) if (d / "regler.json").exists() else {}
@@ -150,7 +150,7 @@ what they point at is not in this corpus.</li>
 </ul>
 </html>"""
     out.write_text(doc)
-    print(f"skrevet: {out}  ({len(doc)} tegn)")
+    print(f"written: {out}  ({len(doc)} chars)")
     return 0
 
 

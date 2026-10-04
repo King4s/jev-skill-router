@@ -1,97 +1,128 @@
 # jev-skill-router
 
-Samler skill-kilder fra hele økosystemet, indekserer dem lokalt, og lader **Jev**
-(TypeSafe System One) vælge de bedste til det projekt du skal bygge.
+Collects skill sources from across the ecosystem, indexes them locally, and lets
+**Jev** (TypeSafe System One) pick the best ones for the project you are about to build.
 
-## Arkitekturen i én sætning
+## The architecture in one sentence
 
-Kode finder kandidater, Jev dømmer dem. 15.000+ skills kan ikke være ét Jev-spørgsmål —
-så FTS5 laver shortlisten, og Jev rangerer den med `Score` + kalibreret confidence.
+Code finds the candidates, Jev judges them. 10.000+ skills cannot be a single Jev
+question — so FTS5 builds the shortlist, and Jev ranks it with `Score` plus calibrated
+confidence.
 
 ```
-Skills-list.md ──► index ──► skills.db (SQLite FTS5) ──► route ──► rangliste
-              GitHub API     17k rækker, 0 deps          FTS5-prefilter
-                                                          └─► Jev: ét kald, Score pr. kandidat
+Skills-list.md ──► index ──► skills.db (SQLite FTS5) ──► route ──► ranking
+                GitHub API   18k rows, 0 deps            FTS5 prefilter
+                                                         └─► Jev: one call, one Score per candidate
 ```
 
-## Målt på første kørsel (2026-10-04)
+## Measured (2026-10-04)
 
 | | |
 |---|---|
-| Kilder i `Skills-list.md` | 98 (34 vendor, 21 tooling, 19 community, 16 list, 8 registry) |
-| Repos der bærer `SKILL.md` | ~75 |
-| Repos uden (rene link-lister) | se *Fase 2* |
-| `SKILL.md` fundet via tree-API | **~17.000** |
-| Stjernetallene i listen | bekræftet ægte mod GitHub-API'et |
+| Sources in `Skills-list.md` | 98 (34 vendor, 21 tooling, 19 community, 16 list, 8 registry) |
+| `SKILL.md` found via the tree API | **18,562** |
+| Unique skills after dedupe | **10,656** (7,408 were copies — 41%) |
+| Sources carrying no `SKILL.md` | 16 — pure link lists, see *Phase 2* |
+| Star counts in the list | verified against the GitHub API |
+| One routing call | 40 candidates scored in **~0.5 s** |
 
-Ingen kloning: hvert repo koster to API-kald (`repos/<r>` + `trees?recursive=1`), og hver
-skill hentes som de første 4 KB af rå-filen — frontmatter er alt routeren bruger.
+Indexing is metadata-only: each repo costs two API calls (`repos/<r>` +
+`trees?recursive=1`), and each skill is fetched as the first 4 KB of the raw file.
+No clones. The frontmatter is all the router uses.
 
-**Genindeksering er inkrementel.** Blob-sha'en fra tree-API'et er versionsnøgle: er den
-uændret, genbruges det cachede frontmatter fra `fm`-tabellen uden et netkald. Første kørsel
-henter alt; efterfølgende kørsler henter kun det Grok Bot har føjet til.
+**Re-indexing is incremental.** The blob sha from the tree API is the version key: an
+unchanged sha reuses the cached frontmatter from the `fm` table with no network call.
+The first run fetches everything; later runs fetch only what Grok Bot added.
 
-## Brug
+## Usage
 
 ```
-python3 router.py index                      # byg/opdatér indekset (netværk, ~5 min)
-python3 router.py stats                      # hvad ligger der
-python3 router.py route "beskriv projektet"  # FTS5-shortlist → Jev → rangliste
-python3 router.py selftest                   # offline check, ingen netværk
+python3 router.py index                      # build/refresh the index (network, ~10 min)
+python3 router.py stats                      # what is in it
+python3 router.py route "describe project"   # FTS5 shortlist -> Jev -> ranking
+python3 router.py selftest                   # offline check, no network
+
+python3 scripts/eval_shortlist.py --show     # does the shortlist find the known-good skills?
+python3 scripts/rapport.py --dir <dir>       # HTML report from route JSON files
 ```
 
-`route --top 40` er default: 40 kandidater i **ét** Jev-kald. Batching er hele pointen —
-21 spørgsmål i ét kald koster samme tid som 1.
+`route --top 40` is the default: 40 candidates in **one** Jev call. Batching is the whole
+point — 21 questions in one call cost the same wall time as 1.
 
-Kræver `gh` (autentificeret) til `index` og `TYPESAFE_API_KEY` (eller
-`~/.config/jev-loop/typesafe_api_key`) til `route`.
+Exact keys: `gh` needs no key (it uses your authenticated session), and `TYPESAFE_API_KEY`
+must be in the environment or at `~/.config/jev-loop/typesafe_api_key`. Both are read
+server-side by the tool and never written into the repo.
+
+## What the measurement says
+
+Four projects with hand-written facit lists (`scripts/eval_shortlist.py`): Minecraft 3/3,
+OpenCorde 4/4, Tilbud 2/4, the router itself 2/4. Shortlist recall is 11/15 — and it is the
+shortlist, not Jev, that loses the two weak cases.
+
+Two rules were measured against each other on the same four projects: plain BM25 11/15,
+IDF-weighted term coverage 5/15. The IDF rule lost because one ultra-rare word
+("friends", "seventeen") outweighs several relevant ones. It is kept in the code only so
+the harness can measure it again.
+
+**Known ceiling — lexical overlap.** When a project's words and a skill's words do not
+overlap, no keyword rule finds it. Measured: "classify each line into a product type from
+a closed vocabulary" leaves the skill *"evaluation strategies for LLM applications"* at
+rank **#248**. Fixing that means semantic retrieval in the first stage; it is not a
+tuning problem.
 
 ## Dedupe
 
-Samme skill ligger kopieret ind i mange awesome-lister. Fingerprint = sha1 af
-normaliseret `name + description`; første forekomst vinder, kopier gemmes med `dup_of`
-peget på originalen. Routeren rangerer kun originalen, men kan svare på hvor mange
-kilder der bærer den.
+The same skill is copied into many awesome-lists. Fingerprint = sha1 of the normalised
+`name + description`; the first occurrence wins and copies are stored with `dup_of`
+pointing at the original. Only the original is ranked, and the copies still record how
+many sources carry it.
 
-## Kilde-tiers
+Note that this catches identical copies, not near-siblings — three variants of
+`*-linux-triage` from one repo can still take three slots in a ranking.
 
-`Skills-list.md` er sektionsopdelt, og sektionsnummeret bliver til en tier:
-`vendor` (officielle firma-repos), `community`, `list` (awesome-lister),
-`registry`, `tooling`. Tieren følger med i ranglisten, så et `vendor`-hit kan
-foretrækkes over et community-hit ved samme score.
+## Source tiers
 
-**Grok Bot vedligeholder `Skills-list.md`.** Tilføj en linje eller en tabelrække med et
-`github.com/owner/repo`-link i den rigtige sektion — routeren læser filen, ingen
-kodeændring nødvendig. Sektioner uden nummer (fx *Flagged / excluded*) ignoreres med vilje.
+`Skills-list.md` is sectioned, and the section number becomes a tier: `vendor` (official
+company repos), `community`, `list` (awesome lists), `registry`, `tooling`. The tier rides
+along in the ranking so a `vendor` hit can be preferred over a community copy at the same
+score.
 
-## Svarkontrakten håndhæves
+**Grok Bot maintains `Skills-list.md`.** Add a line or a table row with a
+`github.com/owner/repo` link in the right section — the router reads the file, no code
+change needed. Unnumbered sections (e.g. *Flagged / excluded*) are ignored on purpose.
 
-Type-sikkerhed der ikke håndhæves er kun kosmetisk. Hvert Jev-svar valideres før det
-tæller: `type == "score"`, `probabilities` med nøgler præcis som niveauerne, alle tal
-finite i [0,1], sum ≈ 1 (±0.02), score inden for niveauerne. Brud dumpes med årsag i
-`rejected` — de forsvinder ikke stille.
+## The answer contract is enforced
 
-Læs `score` **sammen med** `probabilities` og `confidence`. Kalibreringen fra vores egne
-målinger: confidence under 0,5 → 19 % rigtige, over 0,9 → 98,8 %. Et score på 2,4 ved
-confidence 0,35 betyder "modellen er delt mellem to niveauer", ikke "2,4 er sikkert".
+Type safety that is not enforced is only cosmetic. Every Jev answer is validated before it
+counts: `type == "score"`, `probabilities` keyed exactly like the levels, every number
+finite in [0,1], sum within ±0.02 of 1, score inside the level range. Breaches are dropped
+into `rejected` with the reason — they do not disappear quietly.
 
-## Fase 2 — de 14 link-lister
+Read `score` **together with** `probabilities` and `confidence`. From our own measurements:
+confidence below 0.5 → 19% right, above 0.9 → 98.8%. A score of 2.4 at confidence 0.35
+means "the model is split between two levels", not "2.4 is certain".
+
+## Phase 2 — the 16 link lists
 
 `VoltAgent/awesome-agent-skills`, `hesreallyhim/awesome-claude-code`, `agentsmd/agents.md`,
-`intellectronica/ruler`, `K-Dense-AI/claude-skills-mcp` m.fl. bærer ingen `SKILL.md` — de
-*peger* på andre repos. Deres README skal parses for `github.com/owner/repo`-links, og de
-links skal kurateres ind i `sources.txt` (ellers eksploderer korpusét ukontrolleret — én
-af listerne lover 5.400 skills).
+`intellectronica/ruler`, `K-Dense-AI/claude-skills-mcp` and others carry no `SKILL.md` at
+all — they *point* at other repos. Their READMEs have to be parsed for
+`github.com/owner/repo` links, and those links curated into `Skills-list.md`; pulling them
+in automatically would blow the corpus up (one of the lists claims 5,400 skills).
 
-## Sikkerhed
+## Security
 
-Routeren **læser** kun offentlige repos og udfører intet derfra. Installation af en
-anbefalet skill er en separat beslutning: kør den gennem en scanner
-(`NVIDIA/SkillSpector`, `cisco-ai-defense/skill-scanner`) før den lander i en agent.
-En tredjeparts-skill er en prompt-injection-flade, ikke bare en tekstfil.
+The router **reads** public repos only and executes nothing from them. Installing a
+recommended skill is a separate decision: run it through a scanner
+(`NVIDIA/SkillSpector`, `cisco-ai-defense/skill-scanner`) before it reaches an agent. A
+third-party skill is a prompt-injection surface, not just a text file.
 
-## Næste skridt
+## Next step
 
-Rust-first: selve MCP-tjenesten skrives i Rust (`reqwest` + `rusqlite`, Jev kaldes over
-HTTP — der findes ingen Rust-SDK). Denne Python-fil er data-pipelinen der beviser
-loopet; porten sker når rangeringen er målt god nok.
+Rust-first: the MCP service itself is written in Rust (`reqwest` + `rusqlite`; Jev is
+called over HTTP — there is no Rust SDK). This Python file is the data pipeline that
+proves the loop; the port happens once the ranking is measured good enough.
+
+## Repository language
+
+Everything in this repo — code, comments, docs, commit messages — is in English.

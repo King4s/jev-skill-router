@@ -71,6 +71,6 @@ full result including rejected answers.
 
 ## Verification
 
-`python3 router.py selftest` must print `alle checks bestået`. For a route run, check the
+`python3 router.py selftest` must print `all checks passed`. For a route run, check the
 ranked count plus rejected count equals the shortlist size — a silent drop means the
 answer contract rejected something you should look at.
