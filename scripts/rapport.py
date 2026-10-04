@@ -5,7 +5,7 @@ so the report can be regenerated without calling Jev again:
   python3 router.py route "<description>" --out <dir>/<name>.json    # per project
   python3 scripts/rapport.py --dir <dir>                             # -> rapport.html
 
-Every number is read from the files; nothing is written into the HTML."""
+Run measurements come from artifacts; missing legacy provenance stays unknown."""
 import argparse
 import html
 import json
@@ -46,16 +46,31 @@ def main() -> int:
     out = Path(args.out) if args.out else d / "rapport.html"
 
     cards, tot_hit, tot_want = [], 0, 0
+    known_cases = 0
     for name, (want, label) in FACIT.items():
         f = d / f"{name}.json"
         if not f.exists():
             continue
         data = json.loads(f.read_text())
-        ranked, rejected = data["ranked"], data.get("rejected", [])
-        got = [r["name"] for r in ranked]
-        hits = [w for w in want if w in got]
-        tot_hit += len(hits)
-        tot_want += len(want)
+        ranked, rejected = data.get("ranked", []), data.get("rejected", [])
+        got = {r["name"] for r in ranked}
+        rank_hits = [w for w in want if w in got]
+        candidates = data.get("candidates")
+        hits = [w for w in want if w in {c["name"] for c in candidates}] if isinstance(candidates, list) else None
+        if hits is not None:
+            tot_hit += len(hits)
+            tot_want += len(want)
+            known_cases += 1
+        meta = data.get("meta", {})
+        top = meta.get("top", "unknown")
+        corpus = meta.get("corpus", {})
+        latency = meta.get("latency_s", "unknown")
+        provenance = html.escape(f"top {top} · rule {meta.get('rule', 'unknown')} · "
+                                 f"model {meta.get('model') or 'unknown'} · Jev latency {latency} s · "
+                                 f"corpus {corpus.get('unique', 'unknown')} skills / "
+                                 f"{corpus.get('sources', 'unknown')} sources · "
+                                 f"snapshot {corpus.get('identity', 'unknown')}")
+        recall = f"{len(hits)}/{len(want)}" if hits is not None else "unknown (legacy artifact has no candidates)"
         rows = []
         for i, r in enumerate(ranked[:8], 1):
             hit = "hit" if r["name"] in want else ""
@@ -64,21 +79,25 @@ def main() -> int:
                 f'<tr class="{hit}"><td class="n">{i}</td>'
                 f'<td class="nm">{html.escape(r["name"])}'
                 f'<span class="tier" style="color:{TIER_COLOR.get(r["tier"], "")}">'
-                f'{r["tier"]}</span><span class="repo">{html.escape(r["repo"])}</span></td>'
+                f'{html.escape(r["tier"])}</span><span class="repo">{html.escape(r["repo"])}</span></td>'
                 f'<td class="sc">{r["score"]:.2f}</td><td>{bar(r["score"], r["confidence"])}</td>'
                 f'<td class="cf{warn}">{r["confidence"]:.2f}</td></tr>')
-        miss = [w for w in want if w not in got]
+        miss = [w for w in want if w not in {c["name"] for c in candidates}] if isinstance(candidates, list) else []
         cards.append(f"""<section class="card">
 <h3>{html.escape(label)}</h3>
-<p class="verd">Found <b>{len(hits)} of {len(want)}</b> facit skills in the top 40.
-{'<span class="miss">Missing: ' + html.escape(', '.join(miss)) + '</span>' if miss else '<span class="ok">All facit skills found</span>'}
+<p class="sub">{provenance}</p>
+<p class="verd">Retrieval recall: <b>{recall}</b>. Validated ranking coverage: <b>{len(rank_hits)}/{len(want)}</b>.
+{'<span class="miss">Missing from shortlist: ' + html.escape(', '.join(miss)) + '</span>' if miss else ''}
 {'· ' + str(len(rejected)) + ' answers dropped on contract breach' if rejected else ''}</p>
 <table>{''.join(rows)}</table></section>""")
 
+    if not cards:
+        raise ValueError("No known project artifacts found")
     rules = json.loads((d / "regler.json").read_text()) if (d / "regler.json").exists() else {}
+    rules = rules.get("rules", rules)
     rule_rows = "".join(
-        f'<tr><td>{k}</td><td class="sc">{v["hit"]}/{v["want"]}</td>'
-        f'<td>{100 * v["hit"] // v["want"]}%</td><td class="note">{html.escape(v["note"])}</td></tr>'
+        f'<tr><td>{html.escape(k)}</td><td class="sc">{v["hit"]}/{v["want"]}</td>'
+        f'<td>{100 * v["hit"] // v["want"]}%</td><td class="note">{html.escape(v.get("note", ""))}</td></tr>'
         for k, v in rules.items())
 
     doc = f"""<!doctype html><html lang="en"><meta charset="utf-8">
@@ -114,23 +133,23 @@ def main() -> int:
           padding: 0 3px; border-radius: 3px; }}
 </style>
 <h1>Jev Skill Router — does the ranking hold up on real projects?</h1>
-<p class="sub">Measured 2026-10-04 · corpus: 10,656 unique skills from 98 sources ·
-each project: FTS5 shortlist of 40 → one Jev call scoring all 40 · 0.5 s per project.
-Raw route output in the same directory.</p>
+<p class="sub">Measurements and corpus provenance are shown per artifact. Raw route output stays in this directory.
+Unknown legacy values are not substituted with assumed measurements.</p>
 
 <h2>1. What was measured, and on what data</h2>
 <p class="sub">Four project descriptions, each with a hand-written list of skills that <i>should</i>
 appear (facit). Two are Marcin's real projects (OpenCorde, Tilbud 2.0); two are controls where the
 correct answer is obvious (Minecraft server, the router itself — the latter because it must find
-better skills than the ones we wrote by hand). Recall@40: does the right skill survive the
+better skills than the ones we wrote by hand). Retrieval recall at the recorded shortlist size: does the right skill survive the
 shortlist at all? Whether the <i>order</i> is right is Jev's job, not the shortlist's.</p>
-<p class="sub">Shortlist recall across all four: <b>{tot_hit}/{tot_want}</b>.</p>
+<p class="sub">Shortlist recall across {known_cases} artifacts with candidate provenance: <b>{str(tot_hit)+'/'+str(tot_want) if tot_want else 'unknown'}</b>.
+Ranking coverage and answer rejections are reported separately.</p>
 
-<h2>2. The four rankings</h2>
+<h2>2. Rankings present in these artifacts</h2>
 {''.join(cards)}
 
 <h2>3. Which shortlist rule won</h2>
-<p class="sub">Three scoring rules, same four projects, same harness
+<p class="sub">Available scoring-rule measurements, same harness
 (<code>scripts/eval_shortlist.py</code>). Measured, not argued:</p>
 <table>{rule_rows}</table>
 
@@ -138,15 +157,15 @@ shortlist at all? Whether the <i>order</i> is right is Jev's job, not the shortl
 <ul class="limits sub">
 <li><b>The facit lists are mine.</b> They catch "the right skill vanished", not "the order is
 sensible". Recall is the cheap half; ranking quality would need a human or an independent judge.</li>
-<li><b>Lexical retrieval has a ceiling.</b> When a project's words and a skill's words don't
-overlap — "classify into a closed vocabulary" vs "evaluation strategies for LLM applications" —
-no keyword rule finds it. Measured: that skill sat at #248 with the bm25 rule.</li>
+<li><b>A finite shortlist is not a lexical ceiling.</b> In the original four-case snapshot, plain
+recall was 11/15 at 40 and 200, but 14/15 at 300. The LLM evaluation skill at rank 248 has lexical
+overlap. A larger pool must still be measured for request budget and ranking quality.</li>
 <li><b>Near-duplicates crowd the list.</b> Three variants of <code>*-linux-triage</code> from one
-repo can take three slots. Content-hash dedupe doesn't catch siblings that differ by one word.</li>
-<li><b>Jev's confidence is calibrated on TypeSafe's data, not ours.</b> The 0.5/0.9 thresholds are
-their measurements; treat ours as unvalidated until measured here.</li>
-<li><b>16 of 98 sources carry no SKILL.md at all</b> — they are link lists pointing elsewhere, and
-what they point at is not in this corpus.</li>
+repo can take three slots. Metadata-fingerprint dedupe does not prove identical bodies or catch siblings that differ by one word.</li>
+<li><b>Skill-ranking confidence is not validated by another task.</b> Calibration measurements
+from grocery classification or vendor demos do not establish routing accuracy.</li>
+<li><b>Source coverage belongs to the index snapshot.</b> Inspect the recorded discovered, missing-metadata,
+fetch and parse counts; failed enumeration is not evidence of a link-list-only repository.</li>
 </ul>
 </html>"""
     out.write_text(doc)

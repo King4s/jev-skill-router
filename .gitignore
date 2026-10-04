@@ -1,5 +1,6 @@
-# Indekset er afledt data — genopbygges med `router.py index`.
+# Derived indexes and local measurement artifacts are rebuilt, not committed.
 skills.db
 skills.db-journal
 *.json.tmp
 __pycache__/
+measurements/

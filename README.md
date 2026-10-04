@@ -1,128 +1,105 @@
 # jev-skill-router
 
-Collects skill sources from across the ecosystem, indexes them locally, and lets
-**Jev** (TypeSafe System One) pick the best ones for the project you are about to build.
-
-## The architecture in one sentence
-
-Code finds the candidates, Jev judges them. 10.000+ skills cannot be a single Jev
-question — so FTS5 builds the shortlist, and Jev ranks it with `Score` plus calibrated
-confidence.
-
-```
-Skills-list.md ──► index ──► skills.db (SQLite FTS5) ──► route ──► ranking
-                GitHub API   18k rows, 0 deps            FTS5 prefilter
-                                                         └─► Jev: one call, one Score per candidate
-```
-
-## Measured (2026-10-04)
-
-| | |
-|---|---|
-| Sources in `Skills-list.md` | 98 (34 vendor, 21 tooling, 19 community, 16 list, 8 registry) |
-| `SKILL.md` found via the tree API | **18,562** |
-| Unique skills after dedupe | **10,656** (7,408 were copies — 41%) |
-| Sources carrying no `SKILL.md` | 16 — pure link lists, see *Phase 2* |
-| Star counts in the list | verified against the GitHub API |
-| One routing call | 40 candidates scored in **~0.5 s** |
-
-Indexing is metadata-only: each repo costs two API calls (`repos/<r>` +
-`trees?recursive=1`), and each skill is fetched as the first 4 KB of the raw file.
-No clones. The frontmatter is all the router uses.
-
-**Re-indexing is incremental.** The blob sha from the tree API is the version key: an
-unchanged sha reuses the cached frontmatter from the `fm` table with no network call.
-The first run fetches everything; later runs fetch only what Grok Bot added.
+Indexes third-party skill metadata from `Skills-list.md`, retrieves candidates with
+SQLite FTS5, and ranks the shortlist with TypeSafe Jev. It recommends skills; it
+never installs or executes them. The MCP service is not implemented yet.
 
 ## Usage
 
+Python standard library only. Indexing requires authenticated `gh`; routing requires
+`TYPESAFE_API_KEY` or `~/.config/jev-loop/typesafe_api_key`.
+
 ```
-python3 router.py index                      # build/refresh the index (network, ~10 min)
-python3 router.py stats                      # what is in it
-python3 router.py route "describe project"   # FTS5 shortlist -> Jev -> ranking
-python3 router.py selftest                   # offline check, no network
-
-python3 scripts/eval_shortlist.py --show     # does the shortlist find the known-good skills?
-python3 scripts/rapport.py --dir <dir>       # HTML report from route JSON files
+python3 router.py index
+python3 router.py stats
+python3 router.py route "describe project" --top 40 --out route.json
+python3 router.py selftest
+python3 -B -m unittest -v test_router
+python3 scripts/eval_shortlist.py --top 40 --rule plain --require 11
+python3 scripts/eval_shortlist.py --top 300 --rule plain --require 14
+python3 scripts/rapport.py --dir <artifact-directory>
 ```
 
-`route --top 40` is the default: 40 candidates in **one** Jev call. Batching is the whole
-point — 21 questions in one call cost the same wall time as 1.
+Reports recognize case filenames `minecraft.json`, `opencorde.json`, `tilbud.json`
+and `router.json`. Optional `regler.json` holds comparison metrics in the format
+written by `eval_shortlist.py --out`.
 
-Exact keys: `gh` needs no key (it uses your authenticated session), and `TYPESAFE_API_KEY`
-must be in the environment or at `~/.config/jev-loop/typesafe_api_key`. Both are read
-server-side by the tool and never written into the repo.
+## Architecture and review fixes
 
-## What the measurement says
+`Skills-list.md → GitHub metadata → skills.db → FTS5 shortlist → one Jev Score per candidate`
 
-Four projects with hand-written facit lists (`scripts/eval_shortlist.py`): Minecraft 3/3,
-OpenCorde 4/4, Tilbud 2/4, the router itself 2/4. Shortlist recall is 11/15 — and it is the
-shortlist, not Jev, that loses the two weak cases.
+The active default remains plain BM25. Jev judges only what the retriever supplies.
 
-Two rules were measured against each other on the same four projects: plain BM25 11/15,
-IDF-weighted term coverage 5/15. The IDF rule lost because one ultra-rare word
-("friends", "seventeen") outweighs several relevant ones. It is kept in the code only so
-the harness can measure it again.
+- Failed lookup, truncated tree, failed download or malformed/unsupported frontmatter
+  aborts refresh without replacing published rows/cache. Genuine empty trees are
+  distinguished from errors. Successful refresh atomically replaces skills, FTS,
+  sources, cache and provenance; confirmed upstream deletions disappear.
+- Three GitHub API calls pin each source revision: metadata, commit, complete tree.
+  Raw URLs use that revision and escaped file paths, matching blob-SHA cache versions.
+- Complete frontmatter is fetched with a 64 KiB bound, not cut at 4 KiB. The stdlib
+  parser supports plain/quoted scalars and folded/literal blocks with inline comments.
+  It is not a general YAML loader: unsupported required-field structures fail explicitly.
+  Missing usable name/description is counted separately as `missing_metadata`.
+- Coverage records discovered, cached, parsed, missing-metadata, fetch-failure and
+  parse-failure counts. Parser-version changes invalidate old parsed caches.
+- Unicode-preserving SHA-256 fingerprints group normalized **metadata**, retaining C++
+  punctuation. They are not hashes of skill bodies and do not prove equal instructions.
+  First occurrence wins; other sources retain `dup_of` pointers.
+- Responses require valid object shapes, finite JSON numbers excluding strings/bools,
+  exact probability keys, values in [0,1], sum within 0.02 of 1, and score consistent
+  with the weighted mean. Two-decimal rounding tolerance is
+  `0.01 + 0.005 * levels * (levels - 1) / 2`. Invalid answers are rejected, not crashes.
+- Zero accepted answers returns nonzero; partial artifacts carry `degraded=true` and
+  preserve every candidate/rejection. Unexpected answer IDs reject the response.
+- Authentication/validation HTTP errors fail immediately. Transient errors use bounded
+  exponential backoff and Retry-After. No provider fallback or new dependency is added.
+- Positive `--top` values are bounded at 300; serialized Jev requests at 128 KiB. These
+  are client safety ceilings, not TypeSafe context-limit claims. Larger permitted
+  requests can still be rejected upstream; measure budget and ranking quality first.
+- Empty/OOV queries do not divide by zero in IDF/pool variants. `--require` checks the
+  explicitly active rule, not the highest-scoring experiment.
+- Route artifacts include pre-validation candidates, query tokens, requested top,
+  rule, returned model, actual latency and corpus identity/counts. Reports separate
+  retrieval recall from response-validation loss. Unknown legacy provenance stays unknown.
 
-**Known ceiling — lexical overlap.** When a project's words and a skill's words do not
-overlap, no keyword rule finds it. Measured: "classify each line into a product type from
-a closed vocabulary" leaves the skill *"evaluation strategies for LLM applications"* at
-rank **#248**. Fixing that means semantic retrieval in the first stage; it is not a
-tuning problem.
+## Measurements and correction (2026-10-04)
 
-## Dedupe
+The unchanged local snapshot holds 10,656 canonical metadata entries from 98 sources.
+The old pipeline discovered 18,562 paths but inserted 18,064 rows, leaving 498 omissions
+unexplained. It has no parser-version or coverage record. This snapshot was deliberately
+not rebuilt during the fix, keeping retrieval comparisons stable. A separate test DB
+was indexed twice from this repository: one parsed skill, then one blob-SHA cache hit.
 
-The same skill is copied into many awesome-lists. Fingerprint = sha1 of the normalised
-`name + description`; the first occurrence wins and copies are stored with `dup_of`
-pointing at the original. Only the original is ranked, and the copies still record how
-many sources carry it.
+Four hand-selected cases on that unchanged snapshot, plain BM25:
 
-Note that this catches identical copies, not near-siblings — three variants of
-`*-linux-triage` from one repo can still take three slots in a ranking.
+| Limit | Minecraft | OpenCorde | Tilbud | Router | Total |
+|---|---:|---:|---:|---:|---:|
+| 40 | 3/3 | 4/4 | 2/4 | 2/4 | 11/15 |
+| 200 | 3/3 | 4/4 | 2/4 | 2/4 | 11/15 |
+| 300 | 3/3 | 4/4 | 3/4 | 4/4 | 14/15 |
 
-## Source tiers
+**The earlier claim that 11/15 was a lexical ceiling was wrong.** Canonical missing
+skills ranked 232 (Rust MCP), 248 (LLM evaluation), 295 (SQLite), and 7850 (web-scraping).
+Three have substantive lexical overlap; widening beyond 200 finds them. This neither
+proves embeddings necessary nor changes the default top 40. The facit includes
+Python-oriented `fastmcp` in a Rust case: it is a regression fixture, not an independent
+expert benchmark. Recall is candidate survival, not Jev ordering quality. Grocery-task
+or vendor confidence calibration does not establish skill-routing correctness.
 
-`Skills-list.md` is sectioned, and the section number becomes a tier: `vendor` (official
-company repos), `community`, `list` (awesome lists), `registry`, `tooling`. The tier rides
-along in the ranking so a `vendor` hit can be preferred over a community copy at the same
-score.
+The hardened live route/report path was exercised on the router case with 40 candidates.
+Exact model, latency and answer counts belong to its artifact, not an assumed universal
+0.5-second timing. Local probe DBs and evidence live under ignored `measurements/`.
 
-**Grok Bot maintains `Skills-list.md`.** Add a line or a table row with a
-`github.com/owner/repo` link in the right section — the router reads the file, no code
-change needed. Unnumbered sections (e.g. *Flagged / excluded*) are ignored on purpose.
+## Sources and security
 
-## The answer contract is enforced
+Grok Bot maintains `Skills-list.md`. Numbered sections map to vendor, community, list,
+registry and tooling tiers; unnumbered excluded sections are ignored. Link-list sources
+still need curated expansion, not automatic recursive ingestion of arbitrary README URLs.
+An API failure is never evidence that a source contains only links.
 
-Type safety that is not enforced is only cosmetic. Every Jev answer is validated before it
-counts: `type == "score"`, `probabilities` keyed exactly like the levels, every number
-finite in [0,1], sum within ±0.02 of 1, score inside the level range. Breaches are dropped
-into `rejected` with the reason — they do not disappear quietly.
+Third-party metadata and bodies are untrusted. No upstream code is executed. Inspect
+and scan recommended skills before installation. Keys are read locally and never put
+in artifacts or git. The eventual MCP implementation remains Rust-first; no service,
+embedding model, or production deployment is introduced by these fixes.
 
-Read `score` **together with** `probabilities` and `confidence`. From our own measurements:
-confidence below 0.5 → 19% right, above 0.9 → 98.8%. A score of 2.4 at confidence 0.35
-means "the model is split between two levels", not "2.4 is certain".
-
-## Phase 2 — the 16 link lists
-
-`VoltAgent/awesome-agent-skills`, `hesreallyhim/awesome-claude-code`, `agentsmd/agents.md`,
-`intellectronica/ruler`, `K-Dense-AI/claude-skills-mcp` and others carry no `SKILL.md` at
-all — they *point* at other repos. Their READMEs have to be parsed for
-`github.com/owner/repo` links, and those links curated into `Skills-list.md`; pulling them
-in automatically would blow the corpus up (one of the lists claims 5,400 skills).
-
-## Security
-
-The router **reads** public repos only and executes nothing from them. Installing a
-recommended skill is a separate decision: run it through a scanner
-(`NVIDIA/SkillSpector`, `cisco-ai-defense/skill-scanner`) before it reaches an agent. A
-third-party skill is a prompt-injection surface, not just a text file.
-
-## Next step
-
-Rust-first: the MCP service itself is written in Rust (`reqwest` + `rusqlite`; Jev is
-called over HTTP — there is no Rust SDK). This Python file is the data pipeline that
-proves the loop; the port happens once the ranking is measured good enough.
-
-## Repository language
-
-Everything in this repo — code, comments, docs, commit messages — is in English.
+All source, comments, docs and new commit messages are in English.

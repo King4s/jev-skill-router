@@ -5,8 +5,7 @@ description: Route a project to the best third-party skills with Jev.
 
 # Jev Skill Router
 
-Find the skills a project should be built with, out of ~15.000 indexed across the
-ecosystem. Code retrieves candidates from a local SQLite FTS5 index; Jev (TypeSafe
+Find project-relevant skills from the current index snapshot. Code retrieves candidates from a local SQLite FTS5 index; Jev (TypeSafe
 System One) scores them. The router **recommends** — it never installs.
 
 ## When to Use
@@ -36,7 +35,9 @@ python3 router.py selftest                     # offline check of the logic
 
 `route` accepts a free-text project description and prints a ranked table of
 `score`, `confidence`, skill name, tier and source repo. `--out path.json` writes the
-full result including rejected answers.
+full result including pre-validation candidates, rejected answers, degraded status and actual
+query/model/latency/corpus provenance. No valid answers returns a nonzero exit; partial
+results must be inspected rather than mistaken for a complete verdict.
 
 ## Quick Reference
 
@@ -59,18 +60,25 @@ full result including rejected answers.
 
 ## Pitfalls
 
-- **`score` alone is not a verdict.** A 2,4 at confidence 0,35 means Jev is split between two
-  levels. Our calibration: confidence below 0,5 → 19 % right; above 0,9 → 98,8 %.
-- **The index is a snapshot.** Skills get edited upstream; `index` again before a decision
-  that matters.
+- **`score` alone is not a verdict.** Confidence reflects uncertainty, not relevance.
+  Calibration on a different task does not validate this ranking.
+- **The index is a snapshot.** Refresh before decisions that matter. Failed discovery,
+  fetch or parsing preserves the last good published data and exits nonzero. Read the
+  coverage counts; missing metadata is not the same as a network error.
 - **Duplicate skills are normal.** Copies live in many awesome-lists; only the first
   occurrence is ranked, and `dup_of` records the rest.
-- **Vendor tier reads higher at equal score.** Prefer an official repo over a community copy.
+- **Tier is provenance, not an automatic sort boost.** Prefer a verified official source
+  where appropriate; read the actual instructions before trusting metadata grouping.
 - **A skill is untrusted text.** Third-party skills are a prompt-injection surface. Indexing
   is read-only and safe; installing is not.
 
 ## Verification
 
 `python3 router.py selftest` must print `all checks passed`. For a route run, check the
-ranked count plus rejected count equals the shortlist size — a silent drop means the
-answer contract rejected something you should look at.
+ranked count plus rejected count equals `candidates` length, and inspect `degraded`.
+Run `python3 -B -m unittest -v test_router` for offline regression checks.
+`eval_shortlist.py --require N --rule plain` gates the active default rather than the
+best experiment. Top 40 remains the default; `--top` is bounded at 300 and serialized
+requests at 128 KiB. Larger retrieval pools are not a validated ranking improvement.
+The original snapshot measured 11/15 recall at top 40 and 200, but 14/15 at 300; it is
+not evidence of a hard lexical ceiling.
