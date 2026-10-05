@@ -3,7 +3,7 @@
 index it in SQLite FTS5, and let Jev rank the best candidates for a project.
 
 Why it is split this way:
-  * Code finds the candidates (SQLite FTS5, stdlib, no embeddings, no deps).
+  * Code finds the candidates (SQLite FTS5, PyYAML, no embeddings).
   * Jev judges the candidates (one Score per skill, one call, fan-out).
   10.000+ skills cannot be a single Jev question. Jev is the judge, not the index.
 
@@ -13,7 +13,7 @@ Usage:
   python3 router.py route "describe project"  # rank candidates with Jev
   python3 router.py selftest                  # offline check of the logic
 
-Needs: gh (authenticated) for index; TYPESAFE_API_KEY (or
+Needs: PyYAML 6.x; gh (authenticated) for index; TYPESAFE_API_KEY (or
 ~/.config/jev-loop/typesafe_api_key) for route.
 """
 from __future__ import annotations
@@ -37,6 +37,9 @@ import urllib.request
 from urllib.parse import quote
 from pathlib import Path
 
+import yaml
+from yaml.scanner import ScannerError
+
 ROOT = Path(__file__).resolve().parent
 DB = ROOT / "skills.db"
 SOURCES = ROOT / "Skills-list.md"          # maintained by Grok Bot
@@ -46,7 +49,10 @@ KEY_FILE = Path.home() / ".config" / "jev-loop" / "typesafe_api_key"
 MAX_FRONTMATTER_BYTES = 65536
 MAX_TOP = 300            # client safety ceiling; not a claim about provider limits
 MAX_REQUEST_BYTES = 131072
-PARSER_VERSION = "2"
+PARSER_VERSION = "8"
+# Exact, reviewed upstream negative fixture; a changed blob fails closed again.
+KNOWN_FIXTURES = {("larksuite/cli", "scripts/skill-format-check/tests/bad-skill-unclosed-frontmatter/SKILL.md"):
+                  "189d625330abf740f11628c24f06bd3a6524cfdf"}
 RULES = ("plain", "bm25", "pool", "hybrid", "idf")
 PER_WORD = 20            # the "pool" rule: how many documents each query word contributes
 TIERS = {"1": "vendor", "2": "community", "3": "list", "4": "registry", "5": "tooling", "6": "gitlab"}
@@ -66,48 +72,76 @@ def _fold(v: str) -> str:
     return re.sub(r"\s+", " ", v).strip()
 
 
-def _scalar(v: str) -> str:
-    """Read the supported YAML scalar subset; never evaluate tags/objects."""
-    v = v.strip()
-    if v.startswith('"'):
-        value, end = json.JSONDecoder().raw_decode(v)
-        if not isinstance(value, str) or (v[end:].strip() and not v[end:].lstrip().startswith('#')):
-            raise ValueError("invalid quoted scalar")
-        return _fold(value)
-    if v.startswith("'"):
-        m = re.fullmatch(r"'((?:[^']|'')*)'\s*(?:#.*)?", v)
-        if not m:
-            raise ValueError("invalid single-quoted scalar")
-        return _fold(m.group(1).replace("''", "'"))
-    return _fold(re.split(r"\s+#", " " + v, maxsplit=1)[0])
-
-
 def parse_frontmatter(text: str) -> dict:
-    # ponytail: scalar/block YAML subset, not a general YAML loader. Unsupported
-    # required-field structures fail explicitly; add a safe loader only if measured needed.
-    lines = text.lstrip('\ufeff').splitlines()
+    """Read inert YAML nodes, with standalone single-line HTML comments allowed."""
+    text = text.lstrip('\ufeff')
+    lines = text.splitlines()
     if not lines or lines[0] != '---':
         return {}
     try:
         end = lines.index('---', 1)
     except ValueError:
         raise ValueError("frontmatter closing delimiter missing or exceeds size limit") from None
+    body = ''.join(text.splitlines(keepends=True)[1:end])
+    if len(body.encode('utf-8')) > MAX_FRONTMATTER_BYTES:
+        raise ValueError("frontmatter exceeds size limit")
+    original = body.splitlines(keepends=True)
+    candidates = {i for i, line in enumerate(original)
+                  if re.fullmatch(r'[ \t]*<!--(?:(?!-->|<!--).)*-->[ \t]*(?:\r\n?|\n)?', line)}
+    prepared = [line.replace('<!--', '# <!--', 1) if i in candidates else line
+                for i, line in enumerate(original)]
+    try:
+        # One description repair at most; duplicate descriptions still fail closed.
+        description_quoted = False
+        while True:
+            try:
+                tokens = list(yaml.scan(''.join(prepared), Loader=yaml.SafeLoader))
+                break
+            except ScannerError as exc:
+                mark = exc.problem_mark
+                if mark is None or not 0 <= mark.line < len(prepared):
+                    raise
+                line = prepared[mark.line]
+                value = re.split(r'[ \t]+#', line.partition(':')[2].strip(), maxsplit=1)[0].rstrip()
+                if (description_quoted or exc.problem != 'mapping values are not allowed here'
+                        or not re.match(r'^description:[ \t]+', line)
+                        or not len('description:') < mark.column < len(line) or line[mark.column] != ':'
+                        or not value or not value[0].isalnum()):
+                    raise
+                prepared[mark.line] = 'description: ' + json.dumps(value, ensure_ascii=False) + '\n'
+                description_quoted = True
+        # YAML token marks preserve comments that are actually scalar content.
+        literal_lines = set()
+        for token in tokens:
+            if isinstance(token, yaml.tokens.ScalarToken) and token.style in ('"', "'", '|', '>'):
+                literal_lines.update(range(token.start_mark.line, token.end_mark.line))
+        for i in candidates & literal_lines:
+            prepared[i] = original[i]
+        document = ''.join(prepared)
+        for token in yaml.scan(document, Loader=yaml.SafeLoader):
+            if isinstance(token, (yaml.tokens.AnchorToken, yaml.tokens.AliasToken, yaml.tokens.TagToken)):
+                raise ValueError("YAML anchors, aliases and explicit tags are unsupported")
+        root = yaml.compose(document, Loader=yaml.SafeLoader)
+    except (yaml.YAMLError, RecursionError) as exc:
+        raise ValueError("invalid YAML frontmatter") from exc
+    if root is None:
+        return {}
+    if not isinstance(root, yaml.nodes.MappingNode):
+        raise ValueError("frontmatter must be a mapping")
     out: dict[str, str] = {}
-    key = None
-    block = False
-    for line in lines[1:end]:
-        if re.match(r'^[A-Za-z_][A-Za-z0-9_-]*:', line):
-            key, _, raw = line.partition(':')
-            stripped_raw = raw.lstrip()
-            is_quoted = stripped_raw.startswith('"') or stripped_raw.startswith("'")
-            val = _scalar(raw)
-            block = (not is_quoted) and val in {'>', '>-', '>+', '|', '|-', '|+'}
-            if key in {'name', 'description'} and (not is_quoted) and val.startswith(('!', '&', '*', '[', '{')):
-                raise ValueError(f"unsupported {key} scalar")
-            out[key] = '' if block else val
-        elif key and line[:1].isspace() and line.strip() and not line.lstrip().startswith('#'):
-            if block or key == 'description':
-                out[key] = _fold(out[key] + ' ' + line)
+    seen = set()
+    for key, value in root.value:
+        if not isinstance(key, yaml.nodes.ScalarNode) or key.tag != 'tag:yaml.org,2002:str':
+            raise ValueError("metadata keys must be textual scalars")
+        if key.value in seen:
+            raise ValueError(f"duplicate metadata key: {key.value}")
+        seen.add(key.value)
+        if key.value not in ('name', 'description', 'tags'):
+            continue
+        values = value.value if key.value == 'tags' and isinstance(value, yaml.nodes.SequenceNode) else [value]
+        if any(not isinstance(item, yaml.nodes.ScalarNode) for item in values):
+            raise ValueError(f"unsupported {key.value} structure")
+        out[key.value] = _fold(' '.join(item.value for item in values))
     return out
 
 
@@ -164,16 +198,17 @@ def gh_api(path: str):
 
 
 def list_skill_paths(repo: str) -> tuple[str, list[tuple[str, str]], int]:
-    """(branch, [(path, blob sha)], stars) via two API calls — no clone.
+    """(revision, [(path, blob sha)], stars) via three API calls — no clone.
     The blob sha is the version key: an unchanged sha means cached frontmatter can be reused."""
     meta = gh_api(f"repos/{repo}")
     if not isinstance(meta, dict) or not meta.get("default_branch"):
         raise RuntimeError(f"Incomplete repository metadata: {repo}")
     branch = meta["default_branch"]
-    # Pin the commit, then enumerate that revision to avoid cache-SHA/raw-branch races.
-    commit = gh_api(f"repos/{repo}/commits/{quote(branch, safe='')}")
-    revision = commit.get("sha") if isinstance(commit, dict) else None
-    if not revision:
+    # A Git ref pins the revision without downloading unrelated, potentially huge commit patches.
+    ref = gh_api(f"repos/{repo}/git/ref/heads/{quote(branch, safe='')}")
+    obj = ref.get("object") if isinstance(ref, dict) else None
+    revision = obj.get("sha") if isinstance(obj, dict) and obj.get("type") == "commit" else None
+    if not isinstance(revision, str) or not revision:
         raise RuntimeError(f"Missing commit revision: {repo}")
     tree = gh_api(f"repos/{repo}/git/trees/{revision}?recursive=1")
     if not isinstance(tree, dict) or not isinstance(tree.get("tree"), list) or tree.get("truncated"):
@@ -224,6 +259,8 @@ CREATE TABLE IF NOT EXISTS sources (repo TEXT PRIMARY KEY, tier TEXT, branch TEX
 CREATE TABLE IF NOT EXISTS fm (repo TEXT, path TEXT, sha TEXT, name TEXT, desc TEXT, tags TEXT,
   PRIMARY KEY (repo, path));
 CREATE TABLE IF NOT EXISTS index_meta (key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS index_skips (repo TEXT, path TEXT, sha TEXT, reason TEXT,
+  PRIMARY KEY (repo, path));
 """
 
 
@@ -249,6 +286,8 @@ def cmd_index(args) -> int:
 
         def pull(job):
             repo, revision, path, tier, stars, sha = job
+            if KNOWN_FIXTURES.get((repo, path)) == sha:
+                return "known_negative_fixture", None, job
             hit = cache.get((repo, path))
             if hit and sha and hit[0] == sha:
                 return "cached", (repo, path, sha, *hit[1:]), job
@@ -264,12 +303,13 @@ def cmd_index(args) -> int:
                 return "missing_metadata", None, job
             return "parsed", (repo, path, sha, name, desc, fm.get("tags", "")), job
 
-        coverage = {k: 0 for k in ("cached", "parsed", "missing_metadata", "fetch_failed", "parse_failed")}
-        rows, keep = [], []
+        coverage = {k: 0 for k in ("cached", "parsed", "missing_metadata", "known_negative_fixture", "fetch_failed", "parse_failed")}
+        rows, keep, skips = [], [], []
         with cf.ThreadPoolExecutor(max_workers=args.workers) as ex:
             for status, result, job in ex.map(pull, jobs):
                 coverage[status] += 1
                 if not result:
+                    skips.append((job[0], job[2], job[5], status))
                     if status in {"fetch_failed", "parse_failed"}:
                         print(f"[index] {status}: {job[0]}/{job[2]}", file=sys.stderr)
                     continue
@@ -286,10 +326,11 @@ def cmd_index(args) -> int:
 
         # Fetches are complete before publication. One transaction replaces all derived rows.
         db.execute("BEGIN IMMEDIATE")
-        for table in ("skills", "skills_fts", "sources", "fm"):
+        for table in ("skills", "skills_fts", "sources", "fm", "index_skips"):
             db.execute(f"DELETE FROM {table}")
         db.executemany("INSERT INTO sources(repo,tier,branch,stars,listed,truncated,note) VALUES(?,?,?,?,?,?,?)", source_rows)
         db.executemany("INSERT INTO fm(repo,path,sha,name,desc,tags) VALUES(?,?,?,?,?,?)", keep)
+        db.executemany("INSERT INTO index_skips(repo,path,sha,reason) VALUES(?,?,?,?)", skips)
         seen = {}
         for row in rows:
             fp = row[-1]

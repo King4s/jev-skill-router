@@ -1,27 +1,28 @@
 {
-  "goal": "Fix the ten confirmed reliability and measurement issues in jev-skill-router review 921faed, without adding MCP, embeddings or dependencies.",
+  "goal": "Deliver a verified native Rust MCP skill router, complete 98-source index refresh, isolated internal deployment and current English GitHub documentation/report.",
   "acceptance": [
-    "Offline regression tests reproduce then prevent index loss on discovery/fetch failure; truncated discovery is rejected and successful rebuilds atomically remove confirmed upstream deletions.",
-    "Complete bounded metadata parsing and Unicode-preserving metadata grouping retain source identities, invalidate stale parser caches and report fetch/parse/missing-field coverage separately.",
-    "Malformed Jev containers and numeric values never crash validation; inconsistent score distributions are rejected; empty rankings fail, partial results are explicitly degraded, permanent errors are not retried and transient errors back off.",
-    "CLI rejects negative or unbounded request sizes, IDF rules handle empty and out-of-vocabulary input, and the eval acceptance gate measures the active rule rather than the winning experiment.",
-    "Route and report artifacts preserve the candidate set, actual corpus/query/model/timing provenance and separate retrieval recall from validation failures; docs correct the false lexical-ceiling diagnosis.",
-    "All checks pass, independent spec and quality reviews approve, and the executor records real read-only corpus measurements and a live route/report result or an exact network blocker. Other projects and production stay untouched."
+    "All 98 authorized GitHub sources are pinned and completely discovered; every SKILL.md path is represented by an indexed source row or an exact recorded omission. Zero discovery, fetch or parse failures are required before publication; failed refresh preserves the previous corpus.",
+    "A native official-SDK Rust MCP runtime exposes skills_stats, skills_search and skills_route over stdio and authenticated internal Streamable HTTP, uses read-only SQLite with snapshot-consistent provenance, and never launches Python, a shell or skill code.",
+    "Request, response, text and concurrency limits are exercised against the actual compiled binary; Jev validation preserves full candidate accounting, partial/degraded and no-valid-answer distinctions, bounded retries and redacted errors.",
+    "Independent source-based specification and security reviews approve the exact source. Python regression/selftest and actual Rust format/test/Clippy/release plus stdio/HTTP smoke checks pass. Synthetic fixtures are labeled offline, never live provider evidence.",
+    "The tested binary and a verified consistent DB snapshot run in a dedicated non-login Odin systemd service with root-owned code, read-only data, protected secrets and a Tailnet-only bind. Real authenticated MCP-to-Jev ranking and cross-host access pass, and artifact/corpus identities match.",
+    "Current English documentation and a regenerated evidence-based report distinguish retrieval, ranking, validation, degraded results and provenance. Reviewed changes are published through a PR; remote contents and any authorized default-branch update are read back. No history rewriting, secrets or unrelated project changes."
   ],
   "workdir": ".",
   "checks": [
-    "python3 -B -c \"import ast,pathlib; [ast.parse(p.read_text()) for p in pathlib.Path('.').rglob('*.py')]\"",
-    "python3 -B router.py selftest",
-    "python3 -B -m unittest -v test_router"
+    ".venv/bin/python3 -B -c \"import ast,pathlib; [ast.parse(p.read_text()) for p in pathlib.Path('.').rglob('*.py') if not any(x in p.parts for x in ('.venv','.git','target'))]\"",
+    ".venv/bin/python3 -B router.py selftest",
+    ".venv/bin/python3 -B -m unittest -v test_router"
   ],
   "jev_model": "jev-latest",
   "jev_done_threshold": 0.8,
-  "max_turns": 12,
-  "max_consecutive_failures": 3,
+  "max_turns": 20,
+  "max_consecutive_failures": 4,
   "check_timeout": 300,
   "roles": {
-    "test": {"when": "The offline regression suite does not yet reproduce all confirmed review issues", "brief": "Write the smallest stdlib unittest regression checks for the ten findings and run once to capture RED evidence. Do not change implementation or weaken assertions."},
-    "fix": {"when": "Regression checks fail or any review finding remains unfixed", "brief": "Fix only the confirmed review issues, preserve the last good index on harvest failure, harden the Jev boundary, and correct gate/report provenance without adding dependencies or changing the default retrieval rule."},
-    "docs": {"when": "Code checks are green but documentation or real integration evidence is incomplete", "brief": "Correct the lexical-ceiling claim, document actual behavior and record real corpus/live route/report evidence. Do not invent output or modify unrelated systems."}
+    "test": {"when": "A concrete trust-boundary regression is missing", "brief": "Add the smallest runnable failing check for the known defect. Preserve assertions and scope."},
+    "fix": {"when": "A proven defect blocks delivery", "brief": "Fix the demonstrated root cause in the shared path, retaining atomic publication and strict validation."},
+    "build": {"when": "Native Rust implementation is incomplete", "brief": "Complete only the official-SDK native runtime and prove real compilation and integration against the actual index schema."},
+    "docs": {"when": "Reviewed implementation is checked but deployment/report/publication remains", "brief": "Deploy only the authorized internal new service, verify actual artifact/endpoint/provider/corpus behavior, regenerate English evidence and publish only reviewed work. Never substitute a completion claim for a blocker."}
   }
 }

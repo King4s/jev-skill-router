@@ -3,4 +3,11 @@ skills.db
 skills.db-journal
 *.json.tmp
 __pycache__/
+.venv/
 measurements/
+target/
+.env
+*.db
+*.db-journal
+*.db-wal
+*.db-shm

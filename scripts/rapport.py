@@ -100,6 +100,44 @@ def main() -> int:
         f'<td>{100 * v["hit"] // v["want"]}%</td><td class="note">{html.escape(v.get("note", ""))}</td></tr>'
         for k, v in rules.items())
 
+    delivery = ""
+    if (d / "deployment.json").exists():
+        deployed = json.loads((d / "deployment.json").read_text())
+        stats = deployed["stats"]
+        corpus, coverage = stats["corpus"], stats["corpus"]["coverage"]
+        for name in FACIT:
+            if (d / f"{name}.json").exists():
+                route = json.loads((d / f"{name}.json").read_text())
+                assert route.get("meta", {}).get("corpus", {}).get("identity") == corpus["identity"]
+        assert coverage["discovered"] == sum(coverage[k] for k in
+            ("parsed", "missing_metadata", "known_negative_fixture", "parse_failed", "fetch_failed"))
+        assert stats["rows"] == corpus["unique"] + stats["duplicates"] == coverage["parsed"]
+        evaluations = []
+        for n in (40, 300):
+            f = d / f"eval{n}.json"
+            if f.exists():
+                measured = json.loads(f.read_text())
+                assert measured["corpus"]["identity"] == corpus["identity"]
+                v = measured["rules"][measured["active_rule"]]
+                evaluations.append(f"{v['hit']}/{v['want']} at top {measured['top']}")
+        runtime_evidence = (f"Snapshot: {corpus['identity']}\nBinary SHA-256: {deployed['binary_sha256']}"
+                            f"\nDatabase SHA-256: {deployed['database_sha256']}\n"
+                            + deployed['service'] + deployed['listener'])
+        delivery = f"""<section class="card"><h2>Verified native deployment</h2>
+<p>Measured {html.escape(deployed['verified_at'])}. {html.escape(str(corpus['sources']))} pinned sources;
+{coverage['discovered']} paths = {stats['rows']} parsed + {coverage['missing_metadata']} missing metadata
++ {coverage['known_negative_fixture']} exact negative fixture + {coverage['parse_failed']} parse failures
++ {coverage['fetch_failed']} fetch failures. {corpus['unique']} canonical metadata records;
+{stats['duplicates']} duplicate source rows.</p>
+<p>Current lexical recall: <b>{html.escape('; '.join(evaluations)) or 'not recorded'}</b>.
+These regression labels do not establish ranking accuracy. Wider retrieval does not bypass provider budgets.</p>
+<p>{html.escape(deployed['wire_checks'])} Second Tailnet host:
+{html.escape(deployed['second_host'])}, HTTP {html.escape(str(deployed['second_host_status']))} with identical stats.</p>
+<p>{html.escape(deployed['scope'])}</p>
+<details><summary>Snapshot, runtime and isolation evidence</summary>
+<pre>{html.escape(runtime_evidence)}</pre>
+</details></section>"""
+
     doc = f"""<!doctype html><html lang="en"><meta charset="utf-8">
 <title>Jev Skill Router — measurement</title>
 <style>
@@ -135,6 +173,7 @@ def main() -> int:
 <h1>Jev Skill Router — does the ranking hold up on real projects?</h1>
 <p class="sub">Measurements and corpus provenance are shown per artifact. Raw route output stays in this directory.
 Unknown legacy values are not substituted with assumed measurements.</p>
+{delivery}
 
 <h2>1. What was measured, and on what data</h2>
 <p class="sub">Four project descriptions, each with a hand-written list of skills that <i>should</i>

@@ -31,6 +31,38 @@ GOOD = {'type': 'score', 'score': 2.4, 'confidence': 0.7,
 
 
 class ReviewChecks(unittest.TestCase):
+    def test_report_deployment_escaping_and_snapshot_guards(self):
+        report = load_script('rapport')
+        marker = '<img src=x onerror=alert(1)>'
+        corpus = {'identity': 'synthetic', 'sources': marker, 'unique': 0,
+                  'coverage': dict.fromkeys(('discovered', 'parsed', 'missing_metadata',
+                                            'known_negative_fixture', 'parse_failed', 'fetch_failed'), 0)}
+        deployed = {'stats': {'corpus': corpus, 'rows': 0, 'duplicates': 0},
+                    **dict.fromkeys(('verified_at', 'binary_sha256', 'database_sha256', 'service',
+                                     'listener', 'wire_checks', 'second_host', 'scope'), 'synthetic'),
+                    'second_host_status': marker}
+        files = {'minecraft.json': json.dumps({'ranked': [], 'candidates': [],
+                                               'meta': {'corpus': {'identity': 'synthetic'}}}),
+                 'deployment.json': json.dumps(deployed)}
+        with patch.object(report.Path, 'exists', lambda p: p.name in files), \
+             patch.object(report.Path, 'read_text', lambda p: files[p.name]), \
+             patch.object(report.Path, 'write_text') as output, \
+             patch.object(sys, 'argv', ['rapport.py', '--dir', 'synthetic']), \
+             contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(report.main(), 0)
+            doc = output.call_args.args[0]
+            self.assertNotIn(marker, doc)
+            self.assertEqual(doc.count('&lt;img src=x onerror=alert(1)&gt;'), 2)
+            files['eval40.json'] = json.dumps({'corpus': {'identity': 'mismatched'}})
+            output.reset_mock()
+            with self.assertRaises(AssertionError):
+                report.main()
+            output.assert_not_called()
+            del files['deployment.json']
+            del files['eval40.json']
+            self.assertEqual(report.main(), 0)
+            self.assertNotIn('Verified native deployment', output.call_args.args[0])
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(dir=os.environ.get('TMPDIR'))
         self.addCleanup(self.tmp.cleanup)
@@ -56,7 +88,7 @@ class ReviewChecks(unittest.TestCase):
     def snapshot(self):
         with sqlite3.connect(self.path) as db:
             return {table: db.execute('SELECT * FROM '+table).fetchall()
-                    for table in ('skills', 'skills_fts', 'fm', 'sources')}
+                    for table in ('skills', 'skills_fts', 'fm', 'sources', 'index_meta', 'index_skips')}
 
     def route(self, response, top=40):
         out = self.root / 'route.json'
@@ -87,10 +119,35 @@ class ReviewChecks(unittest.TestCase):
         self.assertNotEqual(result, 0)
         self.assertEqual(self.snapshot(), before)
 
+    def test_git_ref_pins_branch_without_commit_diff(self):
+        prefix = 'repos/example/repo'
+        ref_path = prefix + '/git/ref/heads/feature%2Fskills'
+        tree_path = prefix + '/git/trees/pinned-commit?recursive=1'
+        responses = {
+            prefix: {'default_branch': 'feature/skills', 'stargazers_count': 3},
+            ref_path: {'object': {'type': 'commit', 'sha': 'pinned-commit'}},
+            tree_path: {'truncated': False, 'tree': [
+                {'path': 'a/SKILL.md', 'type': 'blob', 'sha': 'blob-sha'}]},
+        }
+        with patch.object(router, 'gh_api', side_effect=responses.__getitem__) as api:
+            self.assertEqual(router.list_skill_paths('example/repo'),
+                             ('pinned-commit', [('a/SKILL.md', 'blob-sha')], 3))
+            self.assertEqual([call.args[0] for call in api.call_args_list],
+                             [prefix, ref_path, tree_path])
+        for bad in ({}, {'object': None}, {'object': []},
+                    {'object': {'type': 'tree', 'sha': 'bad'}},
+                    {'object': {'type': 'commit'}},
+                    {'object': {'type': 'commit', 'sha': []}}):
+            with self.subTest(bad=bad), patch.object(router, 'gh_api', side_effect=[
+                    responses[prefix], bad]) as api:
+                with self.assertRaises(RuntimeError):
+                    router.list_skill_paths('example/repo')
+                self.assertEqual(api.call_count, 2)
+
     def test_truncated_tree_is_not_complete_discovery(self):
         with patch.object(router, 'gh_api', side_effect=[
                 {'default_branch': 'main', 'stargazers_count': 1},
-                {'sha': 'pinned-commit'},
+                {'object': {'type': 'commit', 'sha': 'pinned-commit'}},
                 {'truncated': True, 'tree': []}]):
             with self.assertRaises((RuntimeError, ValueError)):
                 router.list_skill_paths('example/repo')
@@ -120,6 +177,102 @@ class ReviewChecks(unittest.TestCase):
              patch.object(router, 'fetch_head', return_value='---\nname: new\ndescription: [unsupported, structure]\n---\n'):
             self.assertEqual(router.cmd_index(self.index_args), 1)
         self.assertEqual(self.snapshot(), before)
+
+    def test_malformed_top_level_metadata_preserves_snapshot(self):
+        for line in ('description "unterminated', 'unexpected garbage'):
+            with self.subTest(line=line):
+                before = self.snapshot()
+                with patch.object(router, 'list_skill_paths', return_value=('revision', [('SKILL.md', 'changed-blob')], 1)), \
+                     patch.object(router, 'fetch_head', return_value='---\nname: sample\n'+line+'\n---\n'):
+                    self.assertEqual(router.cmd_index(self.index_args), 1)
+                self.assertEqual(self.snapshot(), before)
+        self.assertEqual(router.parse_frontmatter('---\n# comment\nname: sample\n---\n'), {'name': 'sample'})
+
+    def test_ignored_metadata_allows_indentless_sequences_not_garbage(self):
+        metadata = 'name: sample\ndescription: useful text\n'
+        for sequence in ('allowed-tools:\n- Bash\n- Read\n', 'allowed-tools: # comment\n- Bash\n-\n'):
+            for content in (sequence + metadata, metadata + sequence):
+                with self.subTest(content=content):
+                    self.assertEqual(router.parse_frontmatter('---\n' + content + '---\n'),
+                                     {'name': 'sample', 'description': 'useful text'})
+        for content in ('description:\n- forbidden\n', 'allowed-tools: scalar\n- Bash\n',
+                        'allowed-tools:\n- Bash\nunexpected garbage\n', '- orphan\n' + metadata):
+            with self.subTest(content=content), self.assertRaises(ValueError):
+                router.parse_frontmatter('---\n' + content + '---\n')
+
+    def test_flat_tag_sequences_and_documented_html_comment_extension(self):
+        metadata = 'name: sample\ndescription: useful text\n'
+        for indent in ('', '  '):
+            content = metadata + 'tags: # list\n' + ''.join(
+                indent + item + '\n' for item in ('- security # note', '- "audit: code"', "- 'C++'"))
+            self.assertEqual(router.parse_frontmatter('---\n' + content + '---\n'),
+                             {'name': 'sample', 'description': 'useful text', 'tags': 'security audit: code C++'})
+        for content in ('<!-- security-allowlist: all -->\n' + metadata,
+                        metadata + '  <!-- security-allowlist: all -->\n'):
+            self.assertEqual(router.parse_frontmatter('---\n' + content + '---\n'),
+                             {'name': 'sample', 'description': 'useful text'})
+        self.assertEqual(router.parse_frontmatter('---\nname: sample\ndescription: "<!-- literal -->"\n---\n')['description'], '<!-- literal -->')
+        for extra in ('tags:\n- [nested]\n', 'tags:\n- key: value\n', 'tags:\n- &anchor value\n',
+                      'tags:\n- "unterminated\n', 'tags: scalar\n- invalid\n',
+                      '<!-- unclosed\n', '<!-- closed --> trailing garbage\n'):
+            with self.subTest(extra=extra), self.assertRaises(ValueError):
+                router.parse_frontmatter('---\n' + metadata + extra + '---\n')
+
+    def test_reviewed_metadata_structure_and_comment_boundaries(self):
+        malformed = (
+            'name: sample\ndescription: text\ntags:\n  - - child\n',
+            'name: sample\ndescription: text\ntags: &anchor value\n',
+            'name: sample\ndescription: text\ntags: {key: value}\n',
+            'name: sample\ndescription:\n  - forbidden\n',
+            'name: sample\ndescription: text\n<!-- closed --> garbage <!-- closed -->\n',
+        )
+        for content in malformed:
+            with self.subTest(content=content), self.assertRaises(ValueError):
+                router.parse_frontmatter('---\n' + content + '---\n')
+        # These are YAML folded scalars, not nested nodes; preserve the dash text.
+        for content, field, expected in (
+            ('name: sample\ndescription: text\ntags:\n  - parent\n    - child\n', 'tags', 'parent - child'),
+            ('name: sample\ndescription: text\ntags: scalar\n  - invalid\n', 'tags', 'scalar - invalid'),
+            ('name: sample\n  - forbidden\ndescription: text\n', 'name', 'sample - forbidden'),
+        ):
+            self.assertEqual(router.parse_frontmatter('---\n' + content + '---\n')[field], expected)
+        for quote in ('"', "'"):
+            content = '---\nname: sample\ndescription: ' + quote + 'before\n  <!-- literal -->\n  after' + quote + '\n---\n'
+            self.assertEqual(router.parse_frontmatter(content)['description'], 'before <!-- literal --> after')
+        self.assertEqual(router.parse_frontmatter('---\nname: sample\ndescription: text\ntags: "&literal"\n---\n')['tags'], '&literal')
+        for style in ('|', '>'):
+            self.assertEqual(router.parse_frontmatter('---\nname: sample\ndescription: ' + style + '\n  before\n  <!-- literal -->\n  after\n---\n')['description'], 'before <!-- literal --> after')
+        for extra in ('name: duplicate\n', 'tags: *alias\n', 'tags: !custom value\n',
+                      'tags:\n- {key: value}\n', 'tags:\n- [nested]\n'):
+            with self.subTest(extra=extra), self.assertRaises(ValueError):
+                router.parse_frontmatter('---\nname: sample\ndescription: text\n' + extra + '---\n')
+
+    def test_single_line_description_colon_compatibility(self):
+        for value, expected in (
+            ('Run the full repository compatibility pass: scanner score, startup path.',
+             'Run the full repository compatibility pass: scanner score, startup path.'),
+            ('精读一本书: extract core claims.', '精读一本书: extract core claims.'),
+            ('Use "quotes": keep C:\\tools # inline comment', 'Use "quotes": keep C:\\tools'),
+            ('Literal: *text and &text are prose', 'Literal: *text and &text are prose'),
+        ):
+            with self.subTest(value=value):
+                data = router.parse_frontmatter('---\nname: sample\ndescription: ' + value + '\n---\n')
+                self.assertEqual(data, {'name': 'sample', 'description': expected})
+        for quote in ('"', "'"):
+            text = '---\nname: sample\ndescription: ' + quote + 'before\ndescription: text: literal\nafter' + quote + '\n---\n'
+            self.assertEqual(router.parse_frontmatter(text)['description'],
+                             'before description: text: literal after')
+        for content in (
+            'description: *alias: prose\n', 'description: &anchor text: prose\n',
+            'description: !tag text: prose\n', 'description: {key: value}\n',
+            'description: [text: prose]\n', 'description: text: prose\n  continuation\n',
+            'description: text: prose\ndescription: duplicate\n',
+            'description: text: prose\ntags: *alias\n',
+            'description: text: prose\nother: [unclosed\n',
+            'description: text: prose\x00\n', 'name: wrong: value\ndescription: text\n',
+        ):
+            with self.subTest(content=content), self.assertRaises(ValueError):
+                router.parse_frontmatter('---\nname: sample\n' + content + '---\n')
 
     def test_missing_metadata_is_explicitly_accounted(self):
         with patch.object(router, 'list_skill_paths', return_value=('main', [('SKILL.md', 'new-sha')], 1)), \
@@ -233,6 +386,26 @@ class ReviewChecks(unittest.TestCase):
             with self.subTest(raw=raw):
                 with self.assertRaises(ValueError):
                     router.parse_frontmatter('---\nname: sample\ndescription: '+raw+'\n---\n')
+
+    def test_multiline_quoted_metadata_and_ignored_fields(self):
+        for quote in ('\"', "'"):
+            text = ('---\nname: sample\ndescription: ' + quote + 'Build apps\n\n'
+                    '  with safe tools.' + quote + '\nwhen_to_use: ' + quote +
+                    'Some other\n  context' + quote + '\n---\n')
+            self.assertEqual(router.parse_frontmatter(text)['description'], 'Build apps with safe tools.')
+        with self.assertRaises(ValueError):
+            router.parse_frontmatter('---\nname: sample\ndescription: "never closes\n---\n')
+
+    def test_known_negative_fixture_requires_exact_blob(self):
+        (repo, path), sha = next(iter(router.KNOWN_FIXTURES.items()))
+        self.sources.write_text(repo + '\n')
+        for blob, expected in ((sha, 0), ('changed-blob', 1)):
+            with patch.object(router, 'list_skill_paths', return_value=('revision', [(path, blob)], 0)), \
+                 patch.object(router, 'fetch_head', return_value='---\nname: invalid\n'):
+                self.assertEqual(router.cmd_index(self.index_args), expected)
+        with sqlite3.connect(self.path) as db:
+            reason = db.execute('SELECT reason FROM index_skips WHERE path=?', (path,)).fetchone()[0]
+            self.assertEqual(reason, 'known_negative_fixture')
 
     def test_scalar_and_block_yaml_inline_comments(self):
         for desc in ('"A useful skill" # comment', '> # comment\n  A useful skill'):
