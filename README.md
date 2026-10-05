@@ -1,128 +1,203 @@
-# jev-skill-router
+<div align="center">
 
-Collects skill sources from across the ecosystem, indexes them locally, and lets
-**Jev** (TypeSafe System One) pick the best ones for the project you are about to build.
+# Jev Skill Router
 
-## The architecture in one sentence
+### Find the right skills. Let code retrieve. Let Jev judge.
 
-Code finds the candidates, Jev judges them. 10.000+ skills cannot be a single Jev
-question — so FTS5 builds the shortlist, and Jev ranks it with `Score` plus calibrated
-confidence.
+**GitHub metadata → SQLite FTS5 → TypeSafe Jev → ranked recommendations**
 
+[![Verification](https://github.com/King4s/jev-skill-router/actions/workflows/verify.yml/badge.svg)](https://github.com/King4s/jev-skill-router/actions/workflows/verify.yml)
+![Runtime: Rust](https://img.shields.io/badge/runtime-Rust-orange)
+![Protocol: MCP](https://img.shields.io/badge/protocol-MCP-blue)
+![Safety: read only](https://img.shields.io/badge/safety-read--only-2ea44f)
+
+[Quick start](#quick-start) · [MCP tools](#mcp-tools) · [Safety](#safety-and-limits) · [Verification](#verification) · [Sources](Skills-list.md)
+
+</div>
+
+---
+
+A native Rust MCP server that recommends third-party agent skills for a project.
+It retrieves deduplicated metadata with SQLite FTS5/BM25, then sends **one comparable
+Jev Score per candidate in a single provider request**. It never installs or executes skills.
+
+The Python indexer (with PyYAML) and evaluation scripts are **offline tooling**.
+The Rust service opens SQLite read-only and calls TypeSafe directly: no Python wrapper,
+shell subprocess, or skill execution in the runtime.
+
+## Quick start
+
+Requirements: Rust/Cargo, Python 3 with SQLite FTS5, authenticated [GitHub CLI](https://cli.github.com/),
+and a [TypeSafe API key](https://console.typesafe.ai/keys) for ranking. Retrieval needs no model key.
+
+```sh
+git clone https://github.com/King4s/jev-skill-router.git
+cd jev-skill-router
+python3 -m venv .venv
+. .venv/bin/activate
+python3 -m pip install -r requirements-offline.txt
+python3 -B router.py index --workers 16
+python3 -B router.py stats
+cargo build --release --locked
 ```
-Skills-list.md ──► index ──► skills.db (SQLite FTS5) ──► route ──► ranking
-                GitHub API   18k rows, 0 deps            FTS5 prefilter
-                                                         └─► Jev: one call, one Score per candidate
+
+Put `TYPESAFE_API_KEY` in your client's protected environment. Start a **stdio MCP** server:
+
+```sh
+SKILL_ROUTER_DB="$PWD/skills.db" ./target/release/jev-skill-router
 ```
 
-## Measured (2026-10-04)
+The client owns stdin/stdout. Logs go to stderr; closing stdin shuts down the process.
+The native service does **not** read Python's fallback key file. Supply its key explicitly.
 
-| | |
+### Shared internal endpoint
+
+Run the same binary with `--http`. Set `SKILL_ROUTER_TOKEN` to a randomly generated
+secret of at least 32 non-whitespace ASCII bytes, and select a loopback or Tailnet bind.
+Clients POST MCP messages to `/mcp` with `Authorization: Bearer <your-token>` and
+`Accept: application/json, text/event-stream`.
+
+This is **stateless Streamable HTTP**, not a custom REST API. It uses the official
+[`rmcp` SDK](https://github.com/modelcontextprotocol/rust-sdk), pinned in `Cargo.lock`.
+No public/all-interface binds are accepted. See [the deployment guide](deploy/README.md)
+and [the supplied systemd unit](deploy/jev-skill-router.service).
+
+## MCP tools
+
+| Tool | Inputs | Output |
+|---|---|---|
+| `skills_stats` | None | Canonical/duplicate counts, coverage, snapshot identity |
+| `skills_search` | `query`, optional `top` | BM25 candidates and corpus/query provenance; no provider call |
+| `skills_route` | `project`, optional `top` | Ranked/rejected candidates, score, confidence, probabilities and actual model/timing |
+
+`top` defaults to **40** and must be an integer in **1–300**. Text is limited to
+**16 KiB of UTF-8**. Empty or out-of-vocabulary queries return an empty candidate set.
+A route with candidates but no valid provider answers is an MCP tool error; a partial
+route preserves the entire shortlist and sets `degraded=true`.
+
+**Scores measure relevance, not permission to install.** Read the upstream skill and
+inspect confidence as well as score before making a separate installation decision.
+
+## How the index stays honest
+
+```mermaid
+flowchart LR
+    A[98 authorized GitHub sources] --> B[Pin branch revision and complete tree]
+    B --> C[Bounded frontmatter + blob-SHA cache]
+    C --> D[Atomic SQLite snapshot]
+    D --> E[Read-only FTS5 shortlist]
+    E --> F[One Jev Score per candidate]
+    F --> G[Validated ranked recommendations]
+```
+
+- [`Skills-list.md`](Skills-list.md) is the single source list. Numbered sections
+  map to provenance tiers; the flagged/excluded section is not ingested. Site-only
+  registries and GitLab/Hugging Face entries are documented, not implied GitHub coverage.
+- Each GitHub source uses metadata → encoded branch ref → pinned recursive tree.
+  Truncated trees fail explicitly. Raw requests use the pinned revision and escaped paths.
+- Frontmatter is bounded at 64 KiB. Plain/quoted scalars, multiline quoted strings,
+  folded/literal blocks and flat scalar tag lists are supported. Tag lists become normalized
+  text metadata; nested ranking-field objects, anchors, aliases, explicit YAML tags,
+  duplicate top-level keys and malformed scalar values are rejected. SafeLoader syntax nodes
+  retain scalar text without implicit number/date/bool conversion; no upstream objects are constructed.
+- **Documented extension:** fully closed, standalone single-line HTML comments inside
+  frontmatter are ignored. This accommodates upstream metadata without excluding records;
+  comments are never executed or interpreted as security approvals. Token-aware parsing retains
+  comment text inside quoted and folded/literal block scalars. Unclosed comments, trailing garbage
+  and garbage between separate comments are not swallowed by this extension.
+  YAML folding preserves indented dash text within scalar values; only actual nested nodes are
+  rejected. **Description-text compatibility:** when the YAML scanner rejects an unquoted colon
+  separator in a root-level `description:` whose single-line plain value starts with an
+  alphanumeric character, the indexer quotes that literal text and retries safe-node parsing.
+  Inline YAML comments still remain comments. Quoted/block content, other fields, multiline
+  continuations, anchors/aliases/tags, duplicate keys and unrelated malformed syntax are not
+  repaired. Missing metadata remains separate from malformed syntax. This is bounded safe-node
+  parsing, not arbitrary YAML object construction or execution.
+- Missing usable name/description is recorded separately from download or parsing failure.
+  `index_skips` retains exact source/path/blob identities for every intentional omission.
+- One intentionally malformed upstream test fixture is recognized **only by its exact
+  repository, path and blob SHA**. A changed blob becomes an error again; no blanket waiver.
+- Successful refresh atomically replaces skills, FTS5, sources, caches, skip accounting
+  and corpus metadata. Any discovery/fetch/parse failure preserves the last good snapshot.
+- Unicode-preserving SHA-256 fingerprints group **normalized metadata**, not full skill
+  bodies. Source rows remain available via duplicate pointers; metadata equality does not
+  prove equal instructions.
+- The service reads candidates and provenance in a single read transaction. It cannot
+  rebuild or mutate the corpus. Refresh and deployment remain explicit operator actions.
+
+## Safety and limits
+
+| Boundary | Enforced behavior |
 |---|---|
-| Sources in `Skills-list.md` | 98 (34 vendor, 21 tooling, 19 community, 16 list, 8 registry) |
-| `SKILL.md` found via the tree API | **18,562** |
-| Unique skills after dedupe | **10,656** (7,408 were copies — 41%) |
-| Sources carrying no `SKILL.md` | 16 — pure link lists, see *Phase 2* |
-| Star counts in the list | verified against the GitHub API |
-| One routing call | 40 candidates scored in **~0.5 s** |
+| Skill trust | Metadata is untrusted data, never installed or executed |
+| Database | Existing file required; read-only opens; snapshot-consistent retrieval |
+| HTTP | Bearer auth, exact bound Host, reject Origin, 256 KiB actual-body limit including chunked requests |
+| Ranking capacity | Four shared, non-queueing permits; excess requests fail explicitly |
+| Provider budget | 128 KiB serialized request; 2 MiB response; 180-second per-attempt timeout |
+| Retries | At most four attempts; bounded backoff/Retry-After; permanent errors fail immediately |
+| Provider trust | Finite JSON numbers, exact probability keys, bounded probabilities, normalized sum and score consistency |
+| Error handling | Unknown answer IDs reject the response; partial/no-valid distinctions preserved; no provider fallback |
+| Credentials | Environment only for native runtime; provider bodies and transport errors not echoed |
 
-Indexing is metadata-only: each repo costs two API calls (`repos/<r>` +
-`trees?recursive=1`), and each skill is fetched as the first 4 KB of the raw file.
-No clones. The frontmatter is all the router uses.
+Probability normalization permits a 0.02 rounding tolerance; the four-level weighted
+mean permits 0.04. These are validation tolerances, not claims of model accuracy.
+Jev can rank only the retrieved shortlist. Wider retrieval is not automatically better ranking.
 
-**Re-indexing is incremental.** The blob sha from the tree API is the version key: an
-unchanged sha reuses the cached frontmatter from the `fm` table with no network call.
-The first run fetches everything; later runs fetch only what Grok Bot added.
+## Verification
 
-## Usage
+All checks are reproducible and run by [GitHub Actions](.github/workflows/verify.yml):
 
+```sh
+python3 -B -m unittest -v test_router
+python3 -B router.py selftest
+cargo fmt --check
+cargo test --locked
+cargo clippy --locked -- -D warnings
+cargo build --release --locked
+python3 -B scripts/mcp_smoke.py --binary ./target/release/jev-skill-router
 ```
-python3 router.py index                      # build/refresh the index (network, ~10 min)
-python3 router.py stats                      # what is in it
-python3 router.py route "describe project"   # FTS5 shortlist -> Jev -> ranking
-python3 router.py selftest                   # offline check, no network
 
-python3 scripts/eval_shortlist.py --show     # does the shortlist find the known-good skills?
-python3 scripts/rapport.py --dir <dir>       # HTML report from route JSON files
-```
+The MCP smoke harness executes the **real Rust binary**, stdio handshake/EOF and HTTP
+transport, authentication/Host/Origin, invalid inputs, fixed/chunked request limits,
+Python retrieval/token parity, UTF-8 text boundaries, provider byte budgets,
+fail-fast four-slot capacity, and good/partial/invalid/retried provider responses.
+Its temporary database and synthetic provider are explicitly **offline fixtures**, not
+live TypeSafe integration. `--url <internal-mcp-url> --live --out <route.json>` exercises
+a deployed endpoint with the real provider, using `SKILL_ROUTER_TOKEN` from the environment.
 
-`route --top 40` is the default: 40 candidates in **one** Jev call. Batching is the whole
-point — 21 questions in one call cost the same wall time as 1.
+### Evaluation is not ranking accuracy
 
-Exact keys: `gh` needs no key (it uses your authenticated session), and `TYPESAFE_API_KEY`
-must be in the environment or at `~/.config/jev-loop/typesafe_api_key`. Both are read
-server-side by the tool and never written into the repo.
+[`scripts/eval_shortlist.py`](scripts/eval_shortlist.py) compares lexical rules on four
+hand-selected cases. `--require` gates the specified active rule, not the best experiment.
+The verified **2026-10-05 parser-8 snapshot** contains **10,710 canonical metadata records**
+from **98 pinned sources**. All **18,629 discovered paths** are accounted for:
+18,133 parsed records (including 7,423 duplicate source rows), 495 missing-metadata
+paths and one exact negative fixture; **zero fetch or parse failures**.
+Current plain recall is **9/15 at top 40 and 14/15 at top 300**.
+See the [delivery evidence and limitations](docs/delivery-2026-10-05.md).
 
-## What the measurement says
+The original snapshot measured plain recall **11/15 at top 40 and 200, 14/15 at 300**.
+The earlier claim of an 11/15 lexical ceiling was wrong. These labels are regression
+fixtures, not an independent expert benchmark: the Rust case even contains `fastmcp`.
+Neither unrelated Jev confidence calibration nor shortlist recall establishes ordering quality.
 
-Four projects with hand-written facit lists (`scripts/eval_shortlist.py`): Minecraft 3/3,
-OpenCorde 4/4, Tilbud 2/4, the router itself 2/4. Shortlist recall is 11/15 — and it is the
-shortlist, not Jev, that loses the two weak cases.
+The [measurement report generator](scripts/rapport.py) reads route/evaluation JSON,
+separates retrieval from validation, and preserves unknown legacy provenance as unknown.
+Databases, caches, binaries and local measurement artifacts are ignored, not shipped as stale indexes.
 
-Two rules were measured against each other on the same four projects: plain BM25 11/15,
-IDF-weighted term coverage 5/15. The IDF rule lost because one ultra-rare word
-("friends", "seventeen") outweighs several relevant ones. It is kept in the code only so
-the harness can measure it again.
+## Configuration
 
-**Known ceiling — lexical overlap.** When a project's words and a skill's words do not
-overlap, no keyword rule finds it. Measured: "classify each line into a product type from
-a closed vocabulary" leaves the skill *"evaluation strategies for LLM applications"* at
-rank **#248**. Fixing that means semantic retrieval in the first stage; it is not a
-tuning problem.
+| Variable | Default / purpose |
+|---|---|
+| `SKILL_ROUTER_DB` | `skills.db`; existing SQLite snapshot |
+| `TYPESAFE_API_KEY` | Required only when non-empty candidate sets are ranked |
+| `JEV_API` | `https://api.typesafe.ai/v1/systemone`; HTTPS, or loopback HTTP for offline tests |
+| `JEV_MODEL` | `jev-latest` |
+| `SKILL_ROUTER_BIND` | `127.0.0.1:3016`; HTTP only |
+| `SKILL_ROUTER_TOKEN` | Required for HTTP; no default secret |
 
-## Dedupe
+Python also offers `route`, `--out`, `stats`, `selftest` and explicit index rebuilding.
+It may read `~/.config/jev-loop/typesafe_api_key`; the Rust server deliberately does not.
+No embeddings, automatic installers, arbitrary link crawling, or changes to other projects.
 
-The same skill is copied into many awesome-lists. Fingerprint = sha1 of the normalised
-`name + description`; the first occurrence wins and copies are stored with `dup_of`
-pointing at the original. Only the original is ranked, and the copies still record how
-many sources carry it.
-
-Note that this catches identical copies, not near-siblings — three variants of
-`*-linux-triage` from one repo can still take three slots in a ranking.
-
-## Source tiers
-
-`Skills-list.md` is sectioned, and the section number becomes a tier: `vendor` (official
-company repos), `community`, `list` (awesome lists), `registry`, `tooling`. The tier rides
-along in the ranking so a `vendor` hit can be preferred over a community copy at the same
-score.
-
-**Grok Bot maintains `Skills-list.md`.** Add a line or a table row with a
-`github.com/owner/repo` link in the right section — the router reads the file, no code
-change needed. Unnumbered sections (e.g. *Flagged / excluded*) are ignored on purpose.
-
-## The answer contract is enforced
-
-Type safety that is not enforced is only cosmetic. Every Jev answer is validated before it
-counts: `type == "score"`, `probabilities` keyed exactly like the levels, every number
-finite in [0,1], sum within ±0.02 of 1, score inside the level range. Breaches are dropped
-into `rejected` with the reason — they do not disappear quietly.
-
-Read `score` **together with** `probabilities` and `confidence`. From our own measurements:
-confidence below 0.5 → 19% right, above 0.9 → 98.8%. A score of 2.4 at confidence 0.35
-means "the model is split between two levels", not "2.4 is certain".
-
-## Phase 2 — the 16 link lists
-
-`VoltAgent/awesome-agent-skills`, `hesreallyhim/awesome-claude-code`, `agentsmd/agents.md`,
-`intellectronica/ruler`, `K-Dense-AI/claude-skills-mcp` and others carry no `SKILL.md` at
-all — they *point* at other repos. Their READMEs have to be parsed for
-`github.com/owner/repo` links, and those links curated into `Skills-list.md`; pulling them
-in automatically would blow the corpus up (one of the lists claims 5,400 skills).
-
-## Security
-
-The router **reads** public repos only and executes nothing from them. Installing a
-recommended skill is a separate decision: run it through a scanner
-(`NVIDIA/SkillSpector`, `cisco-ai-defense/skill-scanner`) before it reaches an agent. A
-third-party skill is a prompt-injection surface, not just a text file.
-
-## Next step
-
-Rust-first: the MCP service itself is written in Rust (`reqwest` + `rusqlite`; Jev is
-called over HTTP — there is no Rust SDK). This Python file is the data pipeline that
-proves the loop; the port happens once the ranking is measured good enough.
-
-## Repository language
-
-Everything in this repo — code, comments, docs, commit messages — is in English.
+All source, comments, documentation, CLI output and new commit messages are in English.
