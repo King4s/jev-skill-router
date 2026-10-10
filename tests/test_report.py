@@ -11,6 +11,28 @@ REPORT = Path(__file__).resolve().parents[1] / "scripts" / "rapport.py"
 
 
 class ReportCompatibilityTests(unittest.TestCase):
+    def test_priority_success_labels_the_preferred_provider_without_claiming_fallback(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            data = {"provider": "both", "status": "complete", "aggregation": "priority_failover",
+                    "priority": {"order": ["perplexity", "jev"], "basis": "test", "metrics": {}},
+                    "used_providers": ["perplexity"], "providers": {
+                        "perplexity": {"status": "complete"}, "jev": {"status": "not_used"}},
+                    "ranked": [{"name": "minecraft-modding", "repo": "example/skills", "tier": "community",
+                                "score": 2.4, "confidence": 0.8, "aggregation": "single",
+                                "confidence_kind": "provider_reported", "used_providers": ["perplexity"]}],
+                    "rejected": []}
+            (root / "minecraft.json").write_text(json.dumps(data), encoding="utf-8")
+            completed = subprocess.run([sys.executable, str(REPORT), "--dir", str(root)],
+                                       capture_output=True, encoding="utf-8",
+                                       env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            rendered = (root / "rapport.html").read_text(encoding="utf-8")
+            self.assertIn("Decision maker: perplexity", rendered)
+            self.assertNotIn("fallback used", rendered)
+            self.assertNotIn("minimum provider confidence", rendered)
+            self.assertRegex(rendered.lower(), r"provider.?reported confidence")
+
     def test_rejected_candidate_does_not_claim_a_fallback_was_used(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

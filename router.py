@@ -36,6 +36,7 @@ from pathlib import Path
 
 from decision_providers import (KEY_FILE, MAX_QUESTIONS, REQUEST_ID,
                                 ProviderError, decision_call, provider_key, resolve_model)
+from provider_priority import provider_order
 
 ROOT = Path(__file__).resolve().parent
 DB = ROOT / "skills.db"
@@ -427,8 +428,9 @@ def validate_score(ans: dict, levels: int) -> str | None:
 
 
 def score_candidates(project: str, cands: list[dict], provider: str = "jev",
-                     jev_model: str | None = None, perplexity_model: str | None = None) -> dict:
-    """Rank candidates; both mode uses every available valid provider observation."""
+                     jev_model: str | None = None, perplexity_model: str | None = None,
+                     priority_profile=None) -> dict:
+    """Rank candidates with the preferred provider, then fail over only as needed."""
     if provider not in ("jev", "perplexity", "both"):
         raise ProviderError("Choose a decision provider: jev, perplexity, or both.")
     if not isinstance(project, str) or not project.strip():
@@ -436,11 +438,11 @@ def score_candidates(project: str, cands: list[dict], provider: str = "jev",
     names = ["jev", "perplexity"] if provider == "both" else [provider]
     overrides = {"jev": jev_model, "perplexity": perplexity_model}
     result = {"schema_version": 1, "project": project, "provider": provider,
-              "aggregation": "equal_mean_with_fallback" if provider == "both" else "single",
+              "aggregation": "priority_failover" if provider == "both" else "single",
               "status": "unavailable", "used_providers": [],
               "providers": {}, "ranked": [], "rejected": []}
     for name in names:
-        metadata = {"requested_model": None, "resolved_models": [], "status": "complete",
+        metadata = {"requested_model": None, "resolved_models": [], "status": "not_used",
                     "calls": 0, "attempted_calls": 0, "request_ids": [],
                     "usage": {"input_tokens": None, "output_tokens": None}}
         try:
@@ -452,6 +454,9 @@ def score_candidates(project: str, cands: list[dict], provider: str = "jev",
                 raise
             metadata.update(status="unavailable", error=str(error))
         result["providers"][name] = metadata
+    priority = provider_order({name: meta["requested_model"] for name, meta in result["providers"].items()}, profile_path=priority_profile) if provider == "both" else {"order": names, "basis": "explicit_provider", "metrics": {}}
+    result["priority"] = priority
+    order = priority["order"]
     state = {"project": {"spec": project},
              "note": "Pick the level that matches how the candidate applies to THIS project."}
     questions = {}
@@ -467,63 +472,61 @@ def score_candidates(project: str, cands: list[dict], provider: str = "jev",
             },
             "criteria": LEVELS,
         }
-    def score_provider(name):
-        answers = {}
+    observations = {name: {} for name in names}
+    needed_questions = {name: set() for name in names}
+    def ask_batch(name, batch):
         metadata = result["providers"][name]
-        if metadata["status"] == "unavailable":
-            return answers, metadata
-        usage_counts = {field: 0 for field in metadata["usage"]}
-        items = list(questions.items())
-        for start in range(0, len(items), MAX_QUESTIONS):
-            metadata["attempted_calls"] += 1
-            try:
-                raw = decision_call(name, state, dict(items[start:start + MAX_QUESTIONS]),
-                                    model=metadata["requested_model"])
-                if not isinstance(raw, dict) or not isinstance(raw.get("answers"), dict):
-                    raise ProviderError(f"{name} returned an invalid answers envelope.")
-            except Exception as error:
-                reason = str(error) if isinstance(error, ProviderError) else f"{name} request failed unexpectedly."
-                if provider != "both":
-                    raise ProviderError(reason) from None
-                metadata.update(status="partial" if metadata["calls"] else "error", error=reason)
-                # Preserve earlier results, stop this provider, and let the other finish.
-                break
-            # Keep only this batch's question IDs, even if a response includes extras.
-            for key, _ in items[start:start + MAX_QUESTIONS]:
-                if key in raw["answers"]:
-                    answers[key] = raw["answers"][key]
-            metadata["calls"] += 1
-            resolved = raw.get("model")
-            if isinstance(resolved, str) and re.fullmatch(r"[A-Za-z0-9_.:/-]{1,200}", resolved):
-                if resolved not in metadata["resolved_models"]:
-                    metadata["resolved_models"].append(resolved)
-            request_id = raw.get("_request_id")
-            if isinstance(request_id, str) and REQUEST_ID.fullmatch(request_id):
-                if request_id not in metadata["request_ids"]:
-                    metadata["request_ids"].append(request_id)
-            usage = raw.get("usage")
-            if isinstance(usage, dict):
-                for field in metadata["usage"]:
-                    count = usage.get(field)
-                    if isinstance(count, int) and not isinstance(count, bool) and count >= 0:
-                        metadata["usage"][field] = (metadata["usage"][field] or 0) + count
-                        usage_counts[field] += 1
-        for field, count in usage_counts.items():
-            if count != metadata["calls"] or metadata["attempted_calls"] != metadata["calls"]:
-                metadata["usage"][field] = None
-        return answers, metadata
+        metadata["attempted_calls"] += 1
+        try:
+            options = {"model": metadata["requested_model"]}
+            if provider == "both":
+                options["retries"] = 0
+            raw = decision_call(name, state, batch, **options)
+            if not isinstance(raw, dict) or not isinstance(raw.get("answers"), dict):
+                raise ProviderError(f"{name} returned an invalid answers envelope.")
+        except Exception as error:
+            reason = str(error) if isinstance(error, ProviderError) else f"{name} request failed unexpectedly."
+            if provider != "both":
+                raise ProviderError(reason) from None
+            metadata.update(status="partial" if metadata["calls"] else "error", error=reason)
+            metadata["usage"] = {field: None for field in metadata["usage"]}
+            return
+        metadata["status"] = "complete"
+        for key in batch:
+            if key in raw["answers"]:
+                observations[name][key] = raw["answers"][key]
+        metadata["calls"] += 1
+        resolved = raw.get("model")
+        if isinstance(resolved, str) and re.fullmatch(r"[A-Za-z0-9_.:/-]{1,200}", resolved) and resolved not in metadata["resolved_models"]:
+            metadata["resolved_models"].append(resolved)
+        request_id = raw.get("_request_id")
+        if isinstance(request_id, str) and REQUEST_ID.fullmatch(request_id) and request_id not in metadata["request_ids"]:
+            metadata["request_ids"].append(request_id)
+        usage = raw.get("usage", {})
+        for field, previous in metadata["usage"].items():
+            count = usage.get(field) if isinstance(usage, dict) else None
+            valid = isinstance(count, int) and not isinstance(count, bool) and count >= 0
+            metadata["usage"][field] = ((previous or 0) + count) if valid and (metadata["calls"] == 1 or previous is not None) else None
 
-    if len(names) == 2 and cands:
-        with cf.ThreadPoolExecutor(max_workers=2) as pool:
-            futures = {name: pool.submit(score_provider, name) for name in names}
-            observations = {name: futures[name].result() for name in names}
-    else:
-        observations = {name: score_provider(name) for name in names}
-    result["providers"] = {name: observations[name][1] for name in names}
+    items = list(questions.items())
+    for start in range(0, len(items), MAX_QUESTIONS):
+        pending = dict(items[start:start + MAX_QUESTIONS])
+        for name in order:
+            if not pending:
+                break
+            needed_questions[name].update(pending)
+            if result["providers"][name]["status"] in ("unavailable", "error", "partial"):
+                continue
+            ask_batch(name, pending)
+            pending = {key: question for key, question in pending.items()
+                       if validate_score(observations[name].get(key), len(LEVELS)) is not None}
     for i, c in enumerate(cands):
         provider_scores, errors = {}, {}
-        for name in names:
-            answer = observations[name][0].get(f"skill_{i:03d}")
+        for name in order:
+            key = f"skill_{i:03d}"
+            answer = observations[name].get(key)
+            if key not in needed_questions[name]:
+                continue
             error = (result["providers"][name].get("error") if answer is None else None) or validate_score(answer, len(LEVELS))
             if error:
                 errors[name] = error
@@ -538,18 +541,15 @@ def score_candidates(project: str, cands: list[dict], provider: str = "jev",
         scores = list(provider_scores.values())
         result["ranked"].append({**c,
             "used_providers": list(provider_scores), "provider_errors": errors,
-            "aggregation": "equal_mean" if len(scores) == 2 else "single",
-            "score": math.fsum(answer["score"] for answer in scores) / len(scores),
-            "confidence": min(answer["confidence"] for answer in scores),
-            "confidence_kind": "minimum_provider_confidence" if len(scores) == 2 else "provider_reported",
-            "probabilities": {str(level): math.fsum(answer["probabilities"][str(level)] for answer in scores) / len(scores)
-                              for level in range(len(LEVELS))},
+            "aggregation": "single", "is_fallback": provider == "both" and next(iter(provider_scores)) != order[0],
+            "score": scores[0]["score"], "confidence": scores[0]["confidence"],
+            "confidence_kind": "provider_reported", "probabilities": scores[0]["probabilities"],
             "provider_scores": provider_scores,
             "score_disagreement": abs(scores[0]["score"] - scores[-1]["score"]) if len(scores) == 2 else None})
     result["ranked"].sort(key=lambda row: (-row["score"], -row["confidence"]))
-    result["used_providers"] = [name for name in names if any(name in row["provider_scores"] for row in result["ranked"])]
+    result["used_providers"] = [name for name in order if any(name in row["provider_scores"] for row in result["ranked"])]
     if result["ranked"]:
-        degraded = provider == "both" and (any(meta["status"] != "complete" for meta in result["providers"].values())
+        degraded = provider == "both" and (any(meta["status"] not in ("complete", "not_used") for meta in result["providers"].values())
                                            or any(row["provider_errors"] for row in result["ranked"] + result["rejected"]))
         result["status"] = "degraded" if degraded else "complete"
     return result
@@ -571,11 +571,12 @@ def cmd_route(args) -> int:
         print("No candidates — is the index built? (`router.py stats`)")
         return 1
     print(f"[route] {len(cands)} candidates from FTS5, sending to {provider}", flush=True)
-    result = score_candidates(args.project, cands, provider, args.jev_model, args.perplexity_model)
+    result = score_candidates(args.project, cands, provider, args.jev_model, args.perplexity_model, args.priority_profile)
     ranked, rejected = result["ranked"], result["rejected"]
 
     if provider == "both":
-        print("[both] two valid answers: minimum provider confidence, not consensus; one valid answer: provider-reported confidence.")
+        print(f"[both] priority: {' -> '.join(result['priority']['order'])}; {result['priority']['basis']}.")
+        print("[both] preferred provider first; standby is called only when needed. Confidence is provider-reported confidence.")
         print("[both] delta is score disagreement; '-' means only one provider supplied a valid score.")
         if result["status"] != "complete":
             used = ", ".join(result["used_providers"]) or "none"
@@ -652,6 +653,7 @@ def main() -> int:
                    help="Decision maker selection; overrides SKILL_ROUTER_PROVIDER (default: jev).")
     c.add_argument("--jev-model", help="Override JEV_MODEL (default: jev-latest).")
     c.add_argument("--perplexity-model", help="Override PERPLEXITY_DECISION_MODEL (default: pplx-decider-v1.1-27b).")
+    c.add_argument("--priority-profile", help="Model-matched accuracy/cost JSON; overrides SKILL_ROUTER_PRIORITY_PROFILE in both mode.")
     c.set_defaults(fn=cmd_route)
     d = sub.add_parser("selftest"); d.add_argument("--sources", default=SOURCES); d.set_defaults(fn=cmd_selftest)
     args = p.parse_args()

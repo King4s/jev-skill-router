@@ -89,11 +89,29 @@ class ScoreValidationTests(unittest.TestCase):
 
 
 class RoutingTests(unittest.TestCase):
+    def test_standby_error_is_not_attached_to_a_candidate_it_was_not_needed_for(self):
+        providers = importlib.import_module("decision_providers")
+        def decide(provider, state, questions, **kwargs):
+            if provider == "jev":
+                self.assertEqual(set(questions), {"skill_001"})
+                raise providers.ProviderError("Jev request failed")
+            return {"answers": {"skill_000": score_answer()}}
+        with patch.object(router, "decision_call", side_effect=decide):
+            result = router.score_candidates("Build a dashboard", candidates(2), provider="both")
+        self.assertEqual([row["id"] for row in result["ranked"]], [1])
+        self.assertEqual(result["ranked"][0]["provider_errors"], {})
+        self.assertIn("jev", result["rejected"][0]["provider_errors"])
+        self.assertEqual(result["providers"]["jev"]["status"], "error")
+
     def setUp(self):
         environment = patch.dict(os.environ, {"TYPESAFE_API_KEY": "jev-test-key",
             "PERPLEXITY_API_KEY": "pplx-test-key"}, clear=True)
         environment.start()
         self.addCleanup(environment.stop)
+        priority = patch.object(router, "provider_order", create=True,
+                                return_value={"order": ["perplexity", "jev"], "basis": "test", "metrics": {}})
+        self.priority = priority.start()
+        self.addCleanup(priority.stop)
 
     def test_default_mode_preserves_jev_and_existing_output_fields(self):
         calls = []
@@ -112,6 +130,7 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(result["rejected"], [])
         self.assertAlmostEqual(result["ranked"][0]["score"], 2.4)
         self.assertAlmostEqual(result["ranked"][0]["confidence"], 0.8)
+        self.priority.assert_not_called()
 
     def test_perplexity_mode_calls_only_perplexity(self):
         with patch.object(router, "decision_call", side_effect=lambda provider, state, questions, **kw:
@@ -122,7 +141,7 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(list(result["providers"]), ["perplexity"])
         self.assertEqual(len(result["ranked"]), 3)
 
-    def test_both_uses_identical_rubric_and_averages_scores_and_distributions(self):
+    def test_both_uses_the_preferred_provider_without_calling_or_averaging_the_other(self):
         calls = {}
 
         def decide(provider, state, questions, **kwargs):
@@ -133,54 +152,62 @@ class RoutingTests(unittest.TestCase):
         with patch.object(router, "decision_call", side_effect=decide):
             result = router.score_candidates("Build a dashboard", candidates(), provider="both",
                                              jev_model="jev-test", perplexity_model="pplx-test")
-        self.assertEqual(calls["jev"][:2], calls["perplexity"][:2])
-        for question in calls["jev"][1].values():
+        self.assertEqual(list(calls), ["perplexity"])
+        for question in calls["perplexity"][1].values():
             self.assertEqual(question["type"], "score")
             self.assertEqual(question["criteria"], router.LEVELS)
-        self.assertEqual(calls["jev"][2]["model"], "jev-test")
         self.assertEqual(calls["perplexity"][2]["model"], "pplx-test")
-        self.assertEqual(list(result["providers"]), ["jev", "perplexity"])
+        self.assertEqual(calls["perplexity"][2]["retries"], 0)
         self.assertEqual(result["status"], "complete")
-        self.assertEqual(result["used_providers"], ["jev", "perplexity"])
-        self.assertEqual(result["aggregation"], "equal_mean_with_fallback")
+        self.assertEqual(result["used_providers"], ["perplexity"])
+        self.assertEqual(result["aggregation"], "priority_failover")
+        self.assertEqual(result["priority"], {"order": ["perplexity", "jev"], "basis": "test", "metrics": {}})
+        self.assertEqual(result["providers"]["jev"]["status"], "not_used")
+        self.assertEqual(result["providers"]["jev"]["calls"], 0)
+        self.assertEqual(result["providers"]["jev"]["attempted_calls"], 0)
         row = result["ranked"][0]
-        self.assertEqual(row["aggregation"], "equal_mean")
-        self.assertEqual(row["used_providers"], ["jev", "perplexity"])
-        self.assertAlmostEqual(row["score"], 2.3)
+        self.assertEqual(row["aggregation"], "single")
+        self.assertEqual(row["used_providers"], ["perplexity"])
+        self.assertAlmostEqual(row["score"], 1.8)
         self.assertAlmostEqual(row["confidence"], 0.6)
-        self.assertEqual(row["confidence_kind"], "minimum_provider_confidence")
-        self.assertAlmostEqual(row["score_disagreement"], 1.0)
-        self.assertAlmostEqual(row["probabilities"]["1"], 0.1)
-        self.assertAlmostEqual(row["probabilities"]["2"], 0.5)
-        self.assertAlmostEqual(row["probabilities"]["3"], 0.4)
-        self.assertAlmostEqual(row["provider_scores"]["jev"]["score"], 2.8)
+        self.assertEqual(row["confidence_kind"], "provider_reported")
+        self.assertIsNone(row["score_disagreement"])
+        self.assertEqual(row["probabilities"], score_answer(1.8, 0.6)["probabilities"])
+        self.assertEqual(list(row["provider_scores"]), ["perplexity"])
         self.assertAlmostEqual(row["provider_scores"]["perplexity"]["confidence"], 0.6)
 
-    def test_both_calls_can_run_concurrently(self):
-        barrier = threading.Barrier(2)
-
+    def test_both_calls_the_fallback_only_after_the_preferred_provider_fails(self):
+        providers = importlib.import_module("decision_providers")
+        calls = []
         def decide(provider, state, questions, **kwargs):
-            barrier.wait(timeout=3)
+            calls.append((provider, kwargs))
+            if provider == "perplexity":
+                raise providers.ProviderError("perplexity request failed (network or timeout).")
             return response_for(questions)
 
         with patch.object(router, "decision_call", side_effect=decide):
             result = router.score_candidates("Build a dashboard", candidates(1), provider="both")
         self.assertEqual(len(result["ranked"]), 1)
+        self.assertEqual([name for name, _ in calls], ["perplexity", "jev"])
+        self.assertTrue(all(options["retries"] == 0 for _, options in calls))
+        self.assertEqual(result["status"], "degraded")
+        self.assertEqual(result["used_providers"], ["jev"])
 
-    def test_confident_provider_disagreement_is_not_presented_as_consensus(self):
+    def test_valid_low_confidence_preferred_answer_does_not_trigger_an_extra_paid_call(self):
         def decide(provider, state, questions, **kwargs):
-            return response_for(questions, 0 if provider == "jev" else 3, confidence=1)
+            return response_for(questions, 0 if provider == "perplexity" else 3, confidence=0)
 
-        with patch.object(router, "decision_call", side_effect=decide):
+        with patch.object(router, "decision_call", side_effect=decide) as call:
             result = router.score_candidates("Build a dashboard", candidates(1), provider="both")
+        self.assertEqual([args.args[0] for args in call.call_args_list], ["perplexity"])
         row = result["ranked"][0]
-        self.assertEqual(row["score"], 1.5)
-        self.assertEqual(row["confidence"], 1)
-        self.assertEqual(row["confidence_kind"], "minimum_provider_confidence")
-        self.assertEqual(row["score_disagreement"], 3)
-        self.assertEqual(row["probabilities"], {"0": 0.5, "1": 0.0, "2": 0.0, "3": 0.5})
-        self.assertEqual(row["provider_scores"]["jev"]["score"], 0)
-        self.assertEqual(row["provider_scores"]["perplexity"]["score"], 3)
+        self.assertEqual(row["score"], 0)
+        self.assertEqual(row["confidence"], 0)
+        self.assertEqual(row["confidence_kind"], "provider_reported")
+        self.assertIsNone(row["score_disagreement"])
+        self.assertEqual(row["probabilities"], {"0": 1.0, "1": 0.0, "2": 0.0, "3": 0.0})
+        self.assertEqual(row["provider_scores"]["perplexity"]["score"], 0)
+        self.assertEqual(result["status"], "complete")
 
     def test_large_shortlists_are_batched_to_at_most_128_questions(self):
         calls = []
@@ -191,11 +218,11 @@ class RoutingTests(unittest.TestCase):
 
         with patch.object(router, "decision_call", side_effect=decide):
             result = router.score_candidates("Build a dashboard", candidates(257), provider="both")
-        for provider in ("jev", "perplexity"):
-            batches = [questions for who, questions in calls if who == provider]
-            self.assertEqual(sorted(map(len, batches)), [1, 128, 128])
-            keys = [key for questions in batches for key in questions]
-            self.assertEqual(len(set(keys)), 257)
+        self.assertEqual([who for who, _ in calls], ["perplexity"] * 3)
+        batches = [questions for _, questions in calls]
+        self.assertEqual(list(map(len, batches)), [128, 128, 1])
+        keys = [key for questions in batches for key in questions]
+        self.assertEqual(len(set(keys)), 257)
         self.assertEqual(len(result["ranked"]), 257)
         self.assertEqual(result["rejected"], [])
 
@@ -227,8 +254,10 @@ class RoutingTests(unittest.TestCase):
                 result["answers"][next(iter(questions))] = {"type": "score"}
             return result
 
-        with patch.object(router, "decision_call", side_effect=decide):
+        with patch.object(router, "decision_call", side_effect=decide) as call:
             result = router.score_candidates("Build a dashboard", candidates(2), provider="both")
+        self.assertEqual([args.args[0] for args in call.call_args_list], ["perplexity", "jev"])
+        self.assertEqual(list(call.call_args_list[1].args[2]), ["skill_000"])
         self.assertCountEqual([row["id"] for row in result["ranked"]], [1, 2])
         self.assertEqual(result["rejected"], [])
         self.assertEqual(result["status"], "degraded")
@@ -240,8 +269,8 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(list(fallback["provider_scores"]), ["jev"])
         self.assertIn("perplexity", fallback["provider_errors"])
         combined = next(row for row in result["ranked"] if row["id"] == 2)
-        self.assertEqual(combined["used_providers"], ["jev", "perplexity"])
-        self.assertEqual(combined["aggregation"], "equal_mean")
+        self.assertEqual(combined["used_providers"], ["perplexity"])
+        self.assertEqual(combined["aggregation"], "single")
 
     def test_both_provider_failure_uses_the_other_provider_and_reports_it(self):
         providers = importlib.import_module("decision_providers")
@@ -279,6 +308,7 @@ class RoutingTests(unittest.TestCase):
 
     def test_both_missing_jev_key_uses_perplexity_without_calling_jev(self):
         providers = importlib.import_module("decision_providers")
+        self.priority.return_value = {"order": ["jev", "perplexity"], "basis": "test", "metrics": {}}
         with tempfile.TemporaryDirectory() as folder:
             with patch.object(providers, "KEY_FILE", Path(folder) / "missing-key"):
                 with patch.dict(os.environ, {"PERPLEXITY_API_KEY": "pplx-test-key"}, clear=True):
@@ -299,6 +329,7 @@ class RoutingTests(unittest.TestCase):
             model_option = "jev_model" if failed == "jev" else "perplexity_model"
             for problem in ("key", "model"):
                 with self.subTest(provider=failed, problem=problem):
+                    self.priority.return_value = {"order": [failed, survivor], "basis": "test", "metrics": {}}
                     environment = {key_variable: "invalid\nprivate-key"} if problem == "key" else {}
                     options = {model_option: "invalid\nprivate-model"} if problem == "model" else {}
                     with patch.dict(os.environ, environment):
@@ -318,16 +349,16 @@ class RoutingTests(unittest.TestCase):
 
     def test_both_unexpected_provider_exception_falls_back_without_exposing_private_details(self):
         def decide(provider, state, questions, **kwargs):
-            if provider == "jev":
+            if provider == "perplexity":
                 raise RuntimeError("private-key Private project specification")
             return response_for(questions)
 
         with patch.object(router, "decision_call", side_effect=decide):
             result = router.score_candidates("Build a dashboard", candidates(), provider="both")
         self.assertEqual(result["status"], "degraded")
-        self.assertEqual(result["used_providers"], ["perplexity"])
-        self.assertEqual(result["providers"]["jev"]["status"], "error")
-        self.assertTrue(result["providers"]["jev"]["error"])
+        self.assertEqual(result["used_providers"], ["jev"])
+        self.assertEqual(result["providers"]["perplexity"]["status"], "error")
+        self.assertTrue(result["providers"]["perplexity"]["error"])
         self.assertNotIn("private-key", json.dumps(result))
         self.assertNotIn("Private project specification", json.dumps(result))
 
@@ -350,8 +381,8 @@ class RoutingTests(unittest.TestCase):
 
         def decide(provider, state, questions, **kwargs):
             calls[provider].append(list(questions))
-            if provider == "jev" and len(calls[provider]) == 2:
-                raise providers.ProviderError("jev request failed (network or timeout).")
+            if provider == "perplexity" and len(calls[provider]) == 2:
+                raise providers.ProviderError("perplexity request failed (network or timeout).")
             return {**response_for(questions, 2.8 if provider == "jev" else 1.8),
                     "model": f"{provider}-resolved", "_request_id": request_id,
                     "usage": {"input_tokens": 42, "output_tokens": 1}}
@@ -359,40 +390,41 @@ class RoutingTests(unittest.TestCase):
         with patch.object(router, "decision_call", side_effect=decide):
             result = router.score_candidates("Build a dashboard", candidates(257), provider="both")
         self.assertEqual(len(calls["jev"]), 2)
-        self.assertEqual(list(map(len, calls["perplexity"])), [128, 128, 1])
+        self.assertEqual(list(map(len, calls["perplexity"])), [128, 128])
+        self.assertEqual(list(map(len, calls["jev"])), [128, 1])
         self.assertEqual(len(result["ranked"]), 257)
         self.assertEqual(result["rejected"], [])
         self.assertEqual(result["status"], "degraded")
-        self.assertEqual(result["used_providers"], ["jev", "perplexity"])
+        self.assertEqual(result["used_providers"], ["perplexity", "jev"])
         rows = {row["id"]: row for row in result["ranked"]}
         for identifier in range(1, 129):
-            self.assertEqual(rows[identifier]["aggregation"], "equal_mean")
-            self.assertAlmostEqual(rows[identifier]["score"], 2.3)
-        for identifier in range(129, 258):
-            self.assertEqual(rows[identifier]["used_providers"], ["perplexity"])
             self.assertEqual(rows[identifier]["aggregation"], "single")
+            self.assertEqual(rows[identifier]["used_providers"], ["perplexity"])
             self.assertAlmostEqual(rows[identifier]["score"], 1.8)
+        for identifier in range(129, 258):
+            self.assertEqual(rows[identifier]["used_providers"], ["jev"])
+            self.assertEqual(rows[identifier]["aggregation"], "single")
+            self.assertAlmostEqual(rows[identifier]["score"], 2.8)
             self.assertIsNone(rows[identifier]["score_disagreement"])
-        metadata = result["providers"]["jev"]
+        metadata = result["providers"]["perplexity"]
         self.assertEqual(metadata["status"], "partial")
         self.assertEqual(metadata["calls"], 1)
         self.assertEqual(metadata["attempted_calls"], 2)
-        self.assertEqual(metadata["resolved_models"], ["jev-resolved"])
+        self.assertEqual(metadata["resolved_models"], ["perplexity-resolved"])
         self.assertEqual(metadata["request_ids"], [request_id])
         self.assertEqual(metadata["usage"], {"input_tokens": None, "output_tokens": None})
-        self.assertEqual(result["providers"]["perplexity"]["calls"], 3)
-        self.assertEqual(result["providers"]["perplexity"]["usage"],
-                         {"input_tokens": 126, "output_tokens": 3})
+        self.assertEqual(result["providers"]["jev"]["calls"], 2)
+        self.assertEqual(result["providers"]["jev"]["usage"],
+                         {"input_tokens": 84, "output_tokens": 2})
 
     def test_both_rejects_a_candidate_only_when_neither_provider_has_a_valid_answer(self):
         def decide(provider, state, questions, **kwargs):
             answers = response_for(questions)["answers"]
-            keys = list(questions)
-            if provider == "jev":
-                del answers[keys[0]]
-            else:
-                answers[keys[1]] = {"type": "score"}
-            answers[keys[2]] = None
+            if provider == "perplexity":
+                del answers["skill_001"]
+            elif "skill_000" in answers:
+                answers["skill_000"] = {"type": "score"}
+            answers["skill_002"] = None
             return {"answers": answers}
 
         with patch.object(router, "decision_call", side_effect=decide):
@@ -403,7 +435,36 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual([row["id"] for row in result["rejected"]], [3])
         self.assertEqual(set(result["rejected"][0]["provider_errors"]), {"jev", "perplexity"})
         self.assertEqual(result["status"], "degraded")
-        self.assertEqual(result["used_providers"], ["jev", "perplexity"])
+        self.assertEqual(result["used_providers"], ["perplexity", "jev"])
+
+    def test_late_fallback_failure_preserves_earlier_answers_and_preferred_future_batches(self):
+        providers = importlib.import_module("decision_providers")
+        calls = {"perplexity": [], "jev": []}
+
+        def decide(provider, state, questions, **kwargs):
+            calls[provider].append(list(questions))
+            if provider == "jev" and len(calls[provider]) == 2:
+                raise providers.ProviderError("jev request failed (network or timeout).")
+            response = response_for(questions, 1.8 if provider == "perplexity" else 2.8)
+            if provider == "perplexity":
+                del response["answers"][next(iter(questions))]
+            return response
+
+        with patch.object(router, "decision_call", side_effect=decide):
+            result = router.score_candidates("Build a dashboard", candidates(257), provider="both")
+        self.assertEqual(list(map(len, calls["perplexity"])), [128, 128, 1])
+        self.assertEqual(calls["jev"], [["skill_000"], ["skill_128"]])
+        self.assertEqual(len(result["ranked"]), 255)
+        self.assertEqual([row["id"] for row in result["rejected"]], [129, 257])
+        rows = {row["id"]: row for row in result["ranked"]}
+        self.assertEqual(rows[1]["used_providers"], ["jev"])
+        self.assertAlmostEqual(rows[1]["score"], 2.8)
+        self.assertEqual(rows[256]["used_providers"], ["perplexity"])
+        self.assertAlmostEqual(rows[256]["score"], 1.8)
+        self.assertEqual(result["providers"]["jev"]["status"], "partial")
+        self.assertEqual(result["providers"]["jev"]["calls"], 1)
+        self.assertEqual(result["providers"]["jev"]["attempted_calls"], 2)
+        self.assertEqual(result["status"], "degraded")
 
     def test_both_all_provider_failures_preserves_an_unavailable_result_and_all_rejections(self):
         providers = importlib.import_module("decision_providers")
@@ -452,23 +513,37 @@ class RoutingTests(unittest.TestCase):
 
         with patch.object(router, "decision_call", side_effect=decide):
             result = router.score_candidates("Build a dashboard", candidates(129), provider="both")
-        for provider in ("jev", "perplexity"):
-            metadata = result["providers"][provider]
-            self.assertEqual(metadata["calls"], 2)
-            self.assertEqual(metadata["resolved_models"], [f"{provider}-resolved"])
-            self.assertEqual(metadata["usage"], {"input_tokens": 84, "output_tokens": 2})
-            self.assertIn(request_id, metadata["request_ids"])
+        metadata = result["providers"]["perplexity"]
+        self.assertEqual(metadata["calls"], 2)
+        self.assertEqual(metadata["resolved_models"], ["perplexity-resolved"])
+        self.assertEqual(metadata["usage"], {"input_tokens": 84, "output_tokens": 2})
+        self.assertIn(request_id, metadata["request_ids"])
+        self.assertEqual(result["providers"]["jev"]["calls"], 0)
+        self.assertEqual(result["providers"]["jev"]["status"], "not_used")
 
     def test_missing_response_metadata_stays_unavailable(self):
         with patch.object(router, "decision_call", side_effect=lambda provider, state, questions, **kwargs:
                           response_for(questions)):
             result = router.score_candidates("Build a dashboard", candidates(129), provider="both")
-        for provider in ("jev", "perplexity"):
-            metadata = result["providers"][provider]
-            self.assertEqual(metadata["calls"], 2)
-            self.assertEqual(metadata["usage"], {"input_tokens": None, "output_tokens": None})
-            self.assertEqual(metadata["resolved_models"], [])
-            self.assertEqual(metadata["request_ids"], [])
+        metadata = result["providers"]["perplexity"]
+        self.assertEqual(metadata["calls"], 2)
+        self.assertEqual(metadata["usage"], {"input_tokens": None, "output_tokens": None})
+        self.assertEqual(metadata["resolved_models"], [])
+        self.assertEqual(metadata["request_ids"], [])
+        self.assertEqual(result["providers"]["jev"]["status"], "not_used")
+
+    def test_priority_profile_is_forwarded_and_invalid_priority_fails_before_paid_requests(self):
+        providers = importlib.import_module("decision_providers")
+        with patch.object(router, "decision_call", side_effect=lambda provider, state, questions, **kw:
+                          response_for(questions)):
+            router.score_candidates("Build a dashboard", candidates(), provider="both",
+                                    priority_profile="custom-priority.json")
+        self.assertEqual(self.priority.call_args.kwargs["profile_path"], "custom-priority.json")
+        self.priority.side_effect = providers.ProviderError("Invalid provider priority profile.")
+        with patch.object(router, "decision_call") as call:
+            with self.assertRaises(providers.ProviderError):
+                router.score_candidates("Build a dashboard", candidates(), provider="both")
+        call.assert_not_called()
 
     def test_usage_is_total_only_when_every_batch_reports_the_field(self):
         calls = 0
@@ -505,6 +580,104 @@ class RoutingTests(unittest.TestCase):
         call.assert_not_called()
         self.assertEqual(result["ranked"], [])
         self.assertEqual(result["rejected"], [])
+
+
+class ProviderPriorityTests(unittest.TestCase):
+    def profile(self, jev_accuracy=0.92, perplexity_accuracy=0.94,
+                jev_cost=0.00004, perplexity_cost=0.00002):
+        return {"schema_version": 1, "source": "Offline test measurements",
+                "providers": {
+                    "jev": {"models": ["jev-test"], "accuracy": jev_accuracy,
+                            "cost_per_candidate_usd": jev_cost},
+                    "perplexity": {"models": ["pplx-test"], "accuracy": perplexity_accuracy,
+                                   "cost_per_candidate_usd": perplexity_cost}}}
+
+    def order(self, profile, models=None):
+        priority = importlib.import_module("provider_priority")
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "priority.json"
+            path.write_text(json.dumps(profile), encoding="utf-8")
+            return priority.provider_order(models or {"jev": "jev-test", "perplexity": "pplx-test"},
+                                           profile_path=path)
+
+    def test_higher_measured_accuracy_wins_even_when_the_other_provider_is_cheaper(self):
+        result = self.order(self.profile(jev_accuracy=0.96, perplexity_accuracy=0.94,
+                                         jev_cost=0.01, perplexity_cost=0.000001))
+        self.assertEqual(result["order"], ["jev", "perplexity"])
+        self.assertTrue(result["basis"])
+        self.assertEqual(result["metrics"]["jev"]["accuracy"], 0.96)
+
+    def test_lower_measured_cost_breaks_an_exact_accuracy_tie(self):
+        result = self.order(self.profile(jev_accuracy=0.94, perplexity_accuracy=0.94,
+                                         jev_cost=0.00001, perplexity_cost=0.00002))
+        self.assertEqual(result["order"], ["jev", "perplexity"])
+
+    def test_small_accuracy_difference_is_not_rounded_into_a_cost_tie(self):
+        result = self.order(self.profile(jev_accuracy=0.940001, perplexity_accuracy=0.94,
+                                         jev_cost=0.1, perplexity_cost=0.000001))
+        self.assertEqual(result["order"], ["jev", "perplexity"])
+
+    def test_unknown_accuracy_does_not_outweigh_measured_accuracy(self):
+        result = self.order(self.profile(jev_accuracy=None, perplexity_accuracy=0.5,
+                                         jev_cost=0, perplexity_cost=0.01))
+        self.assertEqual(result["order"], ["perplexity", "jev"])
+        self.assertIsNone(result["metrics"]["jev"]["accuracy"])
+
+    def test_unknown_cost_loses_the_cost_tie_to_measured_cost(self):
+        result = self.order(self.profile(jev_accuracy=0.94, perplexity_accuracy=0.94,
+                                         jev_cost=None, perplexity_cost=0.00002))
+        self.assertEqual(result["order"], ["perplexity", "jev"])
+        self.assertIsNone(result["metrics"]["jev"]["cost_per_candidate_usd"])
+
+    def test_measurements_for_a_different_model_are_not_applied_to_a_custom_model(self):
+        result = self.order(self.profile(jev_accuracy=0.9, perplexity_accuracy=0.99),
+                            {"jev": "jev-test", "perplexity": "custom-model"})
+        self.assertEqual(result["order"], ["jev", "perplexity"])
+        self.assertFalse(result["metrics"]["perplexity"]["model_matches"])
+        self.assertIn("provisional", result["basis"])
+        self.assertIsNone(result["metrics"]["perplexity"]["accuracy"])
+        self.assertIsNone(result["metrics"]["perplexity"]["cost_per_candidate_usd"])
+
+    def test_completely_unknown_metrics_have_a_stable_provisional_order(self):
+        result = self.order(self.profile(None, None, None, None))
+        self.assertEqual(result["order"], ["perplexity", "jev"])
+        self.assertTrue(result["basis"])
+
+    def test_invalid_profile_metrics_and_unknown_fields_are_rejected(self):
+        providers = importlib.import_module("decision_providers")
+        invalid = []
+        for field, values in (("accuracy", [True, "0.9", -0.1, 1.1, float("nan"), float("inf")]),
+                              ("cost_per_candidate_usd", [True, "0.01", -1, float("nan"), float("inf")]),
+                              ("models", [[], "jev-test", [True], [""]])):
+            for value in values:
+                profile = self.profile()
+                profile["providers"]["jev"][field] = value
+                invalid.append(profile)
+        unknown_provider = self.profile()
+        unknown_provider["providers"]["unknown"] = copy.deepcopy(unknown_provider["providers"]["jev"])
+        invalid.append(unknown_provider)
+        unknown_field = self.profile()
+        unknown_field["providers"]["jev"]["quality"] = 0.9
+        invalid.append(unknown_field)
+        invalid.append({**self.profile(), "schema_version": 2})
+        for profile in invalid:
+            with self.subTest(profile=profile), self.assertRaises(providers.ProviderError):
+                self.order(profile)
+
+    def test_explicit_profile_overrides_environment_and_missing_profile_is_an_error(self):
+        priority = importlib.import_module("provider_priority")
+        providers = importlib.import_module("decision_providers")
+        with tempfile.TemporaryDirectory() as folder:
+            explicit = Path(folder) / "explicit.json"
+            environment = Path(folder) / "environment.json"
+            explicit.write_text(json.dumps(self.profile(0.96, 0.94)), encoding="utf-8")
+            environment.write_text(json.dumps(self.profile(0.92, 0.94)), encoding="utf-8")
+            models = {"jev": "jev-test", "perplexity": "pplx-test"}
+            with patch.dict(os.environ, {"SKILL_ROUTER_PRIORITY_PROFILE": str(environment)}):
+                self.assertEqual(priority.provider_order(models)["order"], ["perplexity", "jev"])
+                self.assertEqual(priority.provider_order(models, profile_path=explicit)["order"], ["jev", "perplexity"])
+                with self.assertRaises(providers.ProviderError):
+                    priority.provider_order(models, profile_path=Path(folder) / "missing.json")
 
 
 class ProviderHTTPTests(unittest.TestCase):
@@ -734,6 +907,10 @@ class RouteCLITests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
+        priority = patch.object(router, "provider_order", create=True,
+                                return_value={"order": ["perplexity", "jev"], "basis": "test", "metrics": {}})
+        self.priority = priority.start()
+        self.addCleanup(priority.stop)
         self.db = Path(self.directory.name) / "skills.db"
         self.output = Path(self.directory.name) / "ranking.json"
         with contextlib.closing(sqlite3.connect(self.db)) as db:
@@ -767,7 +944,7 @@ class RouteCLITests(unittest.TestCase):
         self.assertEqual(result["provider"], "jev")
         self.assertEqual([row["name"] for row in result["ranked"]], ["react-dashboard"])
 
-    def test_combined_console_output_explains_confidence_and_disagreement(self):
+    def test_both_console_explains_priority_and_single_provider_confidence(self):
         argv = ["router.py", "route", "React dashboard", "--db", str(self.db), "--provider", "both"]
         output = io.StringIO()
         def decide(provider, state, questions, **kwargs):
@@ -776,9 +953,11 @@ class RouteCLITests(unittest.TestCase):
             with patch.object(sys, "argv", argv), patch.object(router, "decision_call", side_effect=decide):
                 with contextlib.redirect_stdout(output):
                     self.assertEqual(router.main(), 0)
-        self.assertIn("minimum provider confidence", output.getvalue())
-        self.assertIn("disagreement", output.getvalue())
-        self.assertIn("3.00", output.getvalue())
+        rendered = output.getvalue().lower()
+        self.assertRegex(rendered, r"priority|preferred")
+        self.assertRegex(rendered, r"provider.?reported confidence")
+        self.assertNotIn("minimum provider confidence", rendered)
+        self.assertIn("3.00", rendered)
 
     def test_degraded_both_console_identifies_the_survivor_and_provider_reported_confidence(self):
         providers = importlib.import_module("decision_providers")
@@ -799,7 +978,7 @@ class RouteCLITests(unittest.TestCase):
         self.assertIn("fallback", rendered)
         self.assertIn("jev", rendered)
         self.assertRegex(rendered, r"provider.?reported confidence")
-        self.assertRegex(rendered, r"2\.40\s+0\.80\s+-+\s+react-dashboard")
+        self.assertRegex(rendered, r"2\.40\s+0\.80\s+(?:-+\s+)?react-dashboard")
         result = json.loads(self.output.read_text(encoding="utf-8"))
         self.assertEqual(result["status"], "degraded")
         self.assertEqual(result["used_providers"], ["jev"])
@@ -828,7 +1007,17 @@ class RouteCLITests(unittest.TestCase):
                                    "--perplexity-model", "pplx-custom"])
         self.assertEqual(result["provider"], "both")
         self.assertEqual({provider: kwargs["model"] for provider, kwargs in calls},
-                         {"jev": "jev-custom", "perplexity": "pplx-custom"})
+                         {"perplexity": "pplx-custom"})
+        models = self.priority.call_args.args[0]
+        self.assertEqual(models, {"jev": "jev-custom", "perplexity": "pplx-custom"})
+        calls, _ = self.route(["--provider", "jev", "--jev-model", "jev-custom"])
+        self.assertEqual(calls[0][1]["model"], "jev-custom")
+
+    def test_explicit_priority_profile_option_is_forwarded(self):
+        calls, result = self.route(["--provider", "both", "--priority-profile", "custom-priority.json"])
+        self.assertEqual([provider for provider, _ in calls], ["perplexity"])
+        self.assertEqual(self.priority.call_args.kwargs["profile_path"], "custom-priority.json")
+        self.assertEqual(result["priority"]["order"], ["perplexity", "jev"])
 
     def test_environment_selects_provider_but_explicit_option_wins(self):
         calls, result = self.route([], {"SKILL_ROUTER_PROVIDER": "perplexity"})

@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "source": "Decision Bench bench-v4, published data inspected 2026-10-10: https://decisionbench.ai/data.json",
+  "providers": {
+    "perplexity": {
+      "models": ["pplx-decider-v1.1-27b"],
+      "accuracy": 0.9449112978524743,
+      "cost_per_candidate_usd": 0.000016977553688141925
+    },
+    "jev": {
+      "models": ["jev-latest", "jev-1.13.0"],
+      "accuracy": 0.9243697478991597,
+      "cost_per_candidate_usd": 0.00004322407843137255
+    }
+  },
+  "measurement": {
+    "generated_at": "2026-10-10T06:53:31.384104+02:00",
+    "corpus_sha256": "3599baea0d9c7e4e3d86c8b06af96e6850edca037b334bbc6b4e1a0033021725",
+    "cases": 1071,
+    "perplexity_correct": 1012,
+    "jev_correct": 990,
+    "protocol": "https://decisionbench.ai/protocol.txt",
+    "perplexity_route": "OpenRouter Decisions",
+    "jev_route": "TypeSafe direct",
+    "cost_basis": "Published benchmark estimates, not verified invoices"
+  },
+  "notes": [
+    "Provisional external single-choice benchmark, not this router's batched skill-scoring corpus.",
+    "Observed accuracy intervals overlap; this is an initial priority, not proof of universal superiority.",
+    "Replace with task-specific model-matched accuracy and complete-request cost measurements.",
+    "The jev-latest alias was jev-1.13.0 at inspection; refresh the profile when versions or prices change.",
+    "Unit token rates alone do not establish which provider is cheaper for a complete batched request."
+  ]
+}

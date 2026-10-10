@@ -83,13 +83,15 @@ def main() -> int:
         provider = html.escape(", ".join(data["used_providers"]) or "none") if "used_providers" in data else requested
         confidence_note = (" · two valid answers: minimum provider confidence, not consensus; "
                            "one valid answer: provider-reported confidence") if data.get("provider") == "both" else ""
+        if data.get("aggregation") == "priority_failover":
+            confidence_note = " · preferred provider first; confidence is provider-reported confidence"
         routing_note = ""
         if "used_providers" in data:
             used = html.escape(", ".join(data["used_providers"]) or "none")
             status = html.escape(str(data.get("status", "unknown")))
             fallback = ""
             if data.get("status") == "degraded":
-                fallback = " · fallback used" if any(row.get("aggregation") == "single" for row in ranked) else " · incomplete provider coverage"
+                fallback = " · fallback used" if any(row.get("is_fallback", row.get("aggregation") == "single") for row in ranked) else " · incomplete provider coverage"
             routing_note = f" · Requested mode: {requested} · Routing status: {status} · Providers used: {used}{fallback}"
         cards.append(f"""<section class="card">
 <h3>{html.escape(label)}</h3>
