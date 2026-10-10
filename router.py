@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
-"""Jev Skill Router — one file: harvest skill frontmatter from source repos,
-index it in SQLite FTS5, and let Jev rank the best candidates for a project.
+"""Skill Router — harvest skill frontmatter from source repos,
+index it in SQLite FTS5, and let a decision maker like Jev rank candidates.
 
 Why it is split this way:
   * Code finds the candidates (SQLite FTS5, stdlib, no embeddings, no deps).
-  * Jev judges the candidates (one Score per skill, one call, fan-out).
-  10.000+ skills cannot be a single Jev question. Jev is the judge, not the index.
+  * Jev, Perplexity Decisions, or both judge the candidates with the same rubric.
+  Thousands of skills cannot be one question; retrieval precedes decision making.
 
 Usage:
   python3 router.py index                     # build/refresh the index
   python3 router.py stats                     # what is in it
   python3 router.py route "describe project"  # rank candidates with Jev
+  python3 router.py route "describe project" --provider perplexity
+  python3 router.py route "describe project" --provider both
   python3 router.py selftest                  # offline check of the logic
 
 Needs: gh (authenticated) for index; TYPESAFE_API_KEY (or
-~/.config/jev-loop/typesafe_api_key) for route.
+~/.config/jev-loop/typesafe_api_key) for Jev, PERPLEXITY_API_KEY for Perplexity.
 """
 from __future__ import annotations
 
@@ -32,12 +34,14 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from decision_providers import (KEY_FILE, MAX_QUESTIONS, REQUEST_ID,
+                                ProviderError, decision_call, provider_key, resolve_model)
+
 ROOT = Path(__file__).resolve().parent
 DB = ROOT / "skills.db"
 SOURCES = ROOT / "Skills-list.md"          # maintained by Grok Bot
 JEV_API = "https://api.typesafe.ai/v1/systemone"
 JEV_MODEL = os.environ.get("JEV_MODEL", "jev-latest")
-KEY_FILE = Path.home() / ".config" / "jev-loop" / "typesafe_api_key"
 FM_BYTES = 4096          # frontmatter lives in the first few KB of the file
 PER_WORD = 20            # the "pool" rule: how many documents each query word contributes
 TIERS = {"1": "vendor", "2": "community", "3": "list", "4": "registry", "5": "tooling", "6": "gitlab"}
@@ -377,65 +381,69 @@ def shortlist(db: sqlite3.Connection, project: str, top: int, rule: str = "plain
 
 
 def jev_key() -> str:
-    key = os.environ.get("TYPESAFE_API_KEY", "").strip()
-    if not key and KEY_FILE.exists():
-        key = KEY_FILE.read_text(encoding="utf-8").strip()
-    if not key:
-        sys.exit(f"No TypeSafe key: set TYPESAFE_API_KEY or write it to {KEY_FILE}.")
-    return key
+    """Retain the existing helper for callers using the Jev-only interface."""
+    return provider_key("jev")
 
 
 def jev_call(state: dict, questions: dict, retries: int = 3) -> dict:
-    body = json.dumps({"model": JEV_MODEL, "state": state, "questions": questions}).encode()
-    req = urllib.request.Request(JEV_API, data=body, headers={
-        "Authorization": f"Bearer {jev_key()}", "Content-Type": "application/json"})
-    last = None
-    for attempt in range(retries + 1):
-        try:
-            with urllib.request.urlopen(req, timeout=180) as r:
-                return json.loads(r.read())
-        except urllib.error.HTTPError as e:
-            last = f"HTTP {e.code}: {e.read()[:300]!r}"
-            if e.code in (429, 529) and attempt < retries:
-                continue
-        except Exception as e:                                   # network / timeout
-            last = repr(e)
-            if attempt < retries:
-                continue
-    raise RuntimeError(f"Jev unreachable: {last}")
+    return decision_call("jev", state, questions, retries=retries, model=JEV_MODEL)
+
+
+def _finite_number(value) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
 
 
 def validate_score(ans: dict, levels: int) -> str | None:
     """Enforce the answer contract hard. Returns an error string, or None.
     Type safety that is not enforced is only cosmetic."""
-    if ans.get("type") != "score":
-        return f"wrong type: {ans.get('type')!r}"
-    try:
-        score, conf = float(ans["score"]), float(ans["confidence"])
-    except (KeyError, TypeError, ValueError):
-        return "missing score/confidence"
-    probs = ans.get("probabilities") or {}
+    if not isinstance(ans, dict) or ans.get("type") != "score":
+        return "answer must be a score object"
+    score, conf = ans.get("score"), ans.get("confidence")
+    if not _finite_number(score) or not _finite_number(conf):
+        return "score/confidence must be finite numbers"
+    probs = ans.get("probabilities")
+    if not isinstance(probs, dict):
+        return "probabilities must be an object"
     if set(probs) != {str(i) for i in range(levels)}:
-        return f"keys do not match the levels: {sorted(probs)}"
-    vals = [float(v) for v in probs.values()]
+        return "probability keys do not match the rubric levels"
+    if not all(_finite_number(value) for value in probs.values()):
+        return "probabilities must be finite numbers"
+    vals = [float(probs[str(i)]) for i in range(levels)]
     if not all(0.0 <= v <= 1.0 for v in vals):
         return "probability outside [0,1]"
     if abs(sum(vals) - 1.0) > 0.02:
         return f"sum {sum(vals):.3f} != 1"
     if not (0.0 <= score <= levels - 1) or not (0.0 <= conf <= 1.0):
         return f"score/confidence out of range: {score}, {conf}"
+    expected = math.fsum(i * value for i, value in enumerate(vals))
+    if abs(score - expected) > 0.05:
+        return "score does not match the probability distribution"
     return None
 
 
-def cmd_route(args) -> int:
-    db = sqlite3.connect(args.db)
-    cands = shortlist(db, args.project, args.top)
-    if not cands:
-        print("No candidates — is the index built? (`router.py stats`)")
-        return 1
-    print(f"[route] {len(cands)} candidates from FTS5, sending to Jev ({JEV_MODEL})", flush=True)
-
-    state = {"project": {"spec": args.project},
+def score_candidates(project: str, cands: list[dict], provider: str = "jev",
+                     jev_model: str | None = None, perplexity_model: str | None = None) -> dict:
+    """Rank one shared shortlist; no installation and no hidden provider fallback."""
+    if provider not in ("jev", "perplexity", "both"):
+        raise ProviderError("Choose a decision provider: jev, perplexity, or both.")
+    if not isinstance(project, str) or not project.strip():
+        raise ProviderError("The project description must not be empty.")
+    names = ["jev", "perplexity"] if provider == "both" else [provider]
+    overrides = {"jev": jev_model, "perplexity": perplexity_model}
+    models = {name: resolve_model(name, overrides[name]) for name in names}
+    result = {"schema_version": 1, "project": project, "provider": provider,
+              "aggregation": "equal_mean" if provider == "both" else "single",
+              "providers": {}, "ranked": [], "rejected": []}
+    if cands:
+        # An absent second credential must not cause a paid first-provider request.
+        for name in names:
+            provider_key(name)
+    state = {"project": {"spec": project},
              "note": "Pick the level that matches how the candidate applies to THIS project."}
     questions = {}
     for i, c in enumerate(cands):
@@ -450,31 +458,109 @@ def cmd_route(args) -> int:
             },
             "criteria": LEVELS,
         }
-    raw = jev_call(state, questions)
-    answers = raw.get("answers", {})
+    def score_provider(name):
+        answers = {}
+        metadata = {"requested_model": models[name], "resolved_models": [],
+                    "calls": 0, "request_ids": [],
+                    "usage": {"input_tokens": None, "output_tokens": None}}
+        usage_counts = {field: 0 for field in metadata["usage"]}
+        items = list(questions.items())
+        for start in range(0, len(items), MAX_QUESTIONS):
+            raw = decision_call(name, state, dict(items[start:start + MAX_QUESTIONS]), model=models[name])
+            if not isinstance(raw, dict) or not isinstance(raw.get("answers"), dict):
+                raise ProviderError(f"{name} returned an invalid answers envelope.")
+            # Keep only this batch's question IDs, even if a response includes extras.
+            for key, _ in items[start:start + MAX_QUESTIONS]:
+                if key in raw["answers"]:
+                    answers[key] = raw["answers"][key]
+            metadata["calls"] += 1
+            resolved = raw.get("model")
+            if isinstance(resolved, str) and re.fullmatch(r"[A-Za-z0-9_.:/-]{1,200}", resolved):
+                if resolved not in metadata["resolved_models"]:
+                    metadata["resolved_models"].append(resolved)
+            request_id = raw.get("_request_id")
+            if isinstance(request_id, str) and REQUEST_ID.fullmatch(request_id):
+                if request_id not in metadata["request_ids"]:
+                    metadata["request_ids"].append(request_id)
+            usage = raw.get("usage")
+            if isinstance(usage, dict):
+                for field in metadata["usage"]:
+                    count = usage.get(field)
+                    if isinstance(count, int) and not isinstance(count, bool) and count >= 0:
+                        metadata["usage"][field] = (metadata["usage"][field] or 0) + count
+                        usage_counts[field] += 1
+        for field, count in usage_counts.items():
+            if count != metadata["calls"]:
+                metadata["usage"][field] = None
+        return answers, metadata
 
-    ranked, rejected = [], []
+    if len(names) == 2 and cands:
+        with cf.ThreadPoolExecutor(max_workers=2) as pool:
+            futures = {name: pool.submit(score_provider, name) for name in names}
+            observations = {name: futures[name].result() for name in names}
+    else:
+        observations = {name: score_provider(name) for name in names}
+    result["providers"] = {name: observations[name][1] for name in names}
     for i, c in enumerate(cands):
-        err = validate_score(answers.get(f"skill_{i:03d}", {}), len(LEVELS))
-        if err:
-            rejected.append({**c, "error": err})
+        provider_scores, errors = {}, {}
+        for name in names:
+            answer = observations[name][0].get(f"skill_{i:03d}")
+            error = validate_score(answer, len(LEVELS))
+            if error:
+                errors[name] = error
+            else:
+                provider_scores[name] = {"score": float(answer["score"]),
+                                         "confidence": float(answer["confidence"]),
+                                         "probabilities": {key: float(value) for key, value in answer["probabilities"].items()}}
+        if errors:
+            result["rejected"].append({**c, "error": "; ".join(f"{name}: {error}" for name, error in errors.items()),
+                                       "provider_errors": errors, "provider_scores": provider_scores})
             continue
-        a = answers[f"skill_{i:03d}"]
-        ranked.append({**c, "score": float(a["score"]), "confidence": float(a["confidence"]),
-                       "probabilities": a["probabilities"]})
-    ranked.sort(key=lambda r: (-r["score"], -r["confidence"]))
+        scores = list(provider_scores.values())
+        result["ranked"].append({**c,
+            "score": math.fsum(answer["score"] for answer in scores) / len(scores),
+            "confidence": min(answer["confidence"] for answer in scores),
+            "confidence_kind": "minimum_provider_confidence" if provider == "both" else "provider_reported",
+            "probabilities": {str(level): math.fsum(answer["probabilities"][str(level)] for answer in scores) / len(scores)
+                              for level in range(len(LEVELS))},
+            "provider_scores": provider_scores,
+            "score_disagreement": abs(scores[0]["score"] - scores[-1]["score"])})
+    result["ranked"].sort(key=lambda row: (-row["score"], -row["confidence"]))
+    return result
 
-    print(f"\n{'score':>5} {'conf':>5}  skill")
+
+def cmd_route(args) -> int:
+    provider = args.provider or os.environ.get("SKILL_ROUTER_PROVIDER", "jev")
+    if provider not in ("jev", "perplexity", "both"):
+        raise ProviderError("SKILL_ROUTER_PROVIDER must be jev, perplexity, or both.")
+    if not args.project.strip():
+        raise ProviderError("The project description must not be empty.")
+    # Read-only opening avoids creating a misleading empty index when it is missing.
+    db = sqlite3.connect(Path(args.db).resolve().as_uri() + "?mode=ro", uri=True)
+    try:
+        cands = shortlist(db, args.project, args.top)
+    finally:
+        db.close()
+    if not cands:
+        print("No candidates — is the index built? (`router.py stats`)")
+        return 1
+    print(f"[route] {len(cands)} candidates from FTS5, sending to {provider}", flush=True)
+    result = score_candidates(args.project, cands, provider, args.jev_model, args.perplexity_model)
+    ranked, rejected = result["ranked"], result["rejected"]
+
+    if provider == "both":
+        print("[both] conf is minimum provider confidence, not consensus; delta is score disagreement.")
+    print(f"\n{'score':>5} {'conf':>5}" + (f" {'delta':>5}" if provider == "both" else "") + "  skill")
     for r in ranked[:args.show]:
-        print(f"{r['score']:5.2f} {r['confidence']:5.2f}  {r['name']}  [{r['tier']}] {r['repo']}")
+        delta = f" {r['score_disagreement']:5.2f}" if provider == "both" else ""
+        print(f"{r['score']:5.2f} {r['confidence']:5.2f}{delta}  {r['name']}  [{r['tier']}] {r['repo']}")
     if rejected:
         print(f"\n{len(rejected)} answers dropped on contract breach "
               f"(first: {rejected[0]['name']}: {rejected[0]['error']})")
     if args.out:
-        Path(args.out).write_text(json.dumps({"project": args.project, "ranked": ranked,
-                                             "rejected": rejected}, indent=1, ensure_ascii=False))
+        Path(args.out).write_text(json.dumps(result, indent=1, ensure_ascii=False, allow_nan=False), encoding="utf-8")
         print(f"\nwritten: {args.out}")
-    return 0
+    return 0 if ranked else 1
 
 
 # ---------------------------------------------------------------- selftest
@@ -507,15 +593,45 @@ def cmd_selftest(args) -> int:
     return 0
 
 
+def positive_int(value: str) -> int:
+    try:
+        number = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("Use a positive integer.") from None
+    if number < 1:
+        raise argparse.ArgumentTypeError("Use a positive integer.")
+    return number
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = p.add_subparsers(dest="cmd", required=True)
     a = sub.add_parser("index"); a.add_argument("--db", default=DB); a.add_argument("--sources", default=SOURCES); a.add_argument("--workers", type=int, default=16); a.set_defaults(fn=cmd_index)
     b = sub.add_parser("stats"); b.add_argument("--db", default=DB); b.set_defaults(fn=cmd_stats)
-    c = sub.add_parser("route"); c.add_argument("project"); c.add_argument("--db", default=DB); c.add_argument("--top", type=int, default=40); c.add_argument("--show", type=int, default=25); c.add_argument("--out"); c.set_defaults(fn=cmd_route)
+    c = sub.add_parser("route")
+    c.add_argument("project")
+    c.add_argument("--db", default=DB)
+    c.add_argument("--top", type=positive_int, default=40)
+    c.add_argument("--show", type=positive_int, default=25)
+    c.add_argument("--out")
+    c.add_argument("--provider", choices=("jev", "perplexity", "both"),
+                   help="Decision maker selection; overrides SKILL_ROUTER_PROVIDER (default: jev).")
+    c.add_argument("--jev-model", help="Override JEV_MODEL (default: jev-latest).")
+    c.add_argument("--perplexity-model", help="Override PERPLEXITY_DECISION_MODEL (default: pplx-decider-v1.1-27b).")
+    c.set_defaults(fn=cmd_route)
     d = sub.add_parser("selftest"); d.add_argument("--sources", default=SOURCES); d.set_defaults(fn=cmd_selftest)
     args = p.parse_args()
-    return args.fn(args)
+    try:
+        return args.fn(args)
+    except ProviderError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    except sqlite3.Error:
+        print("error: Cannot read the skill index; run `router.py index` first.", file=sys.stderr)
+        return 1
+    except OSError:
+        print("error: Cannot read or write the requested file.", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":
