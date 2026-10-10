@@ -1,21 +1,27 @@
 # jev-skill-router
 
 Collects skill sources from across the ecosystem, indexes them locally, and lets
-**Jev** (TypeSafe System One) pick the best ones for the project you are about to build.
+**a decision maker like Jev** pick the best ones for the project you are about to build.
+Choose **Jev**, **Perplexity Decisions**, or **both**. The router recommends skills;
+it does not install or activate them.
 
 ## The architecture in one sentence
 
-Code finds the candidates, Jev judges them. 10.000+ skills cannot be a single Jev
-question — so FTS5 builds the shortlist, and Jev ranks it with `Score` plus calibrated
-confidence.
+Code finds the candidates; the selected decision maker judges them. FTS5 builds a
+shortlist from thousands of skills, and the providers rank it against the same
+four-level relevance rubric, with their own reported confidence.
 
 ```
 Skills-list.md ──► index ──► skills.db (SQLite FTS5) ──► route ──► ranking
                 GitHub API   18k rows, 0 deps            FTS5 prefilter
-                                                         └─► Jev: one call, one Score per candidate
+                                                         └─► Jev / Perplexity / both
+                                                              one Score per candidate per provider
 ```
 
 ## Measured (2026-10-04)
+
+These historical measurements used Jev only. They do not measure Perplexity or
+the combined ranking, whose accuracy and calibration need their own evaluation.
 
 | | |
 |---|---|
@@ -39,19 +45,63 @@ The first run fetches everything; later runs fetch only what Grok Bot added.
 ```
 python3 router.py index                      # build/refresh the index (network, ~10 min)
 python3 router.py stats                      # what is in it
-python3 router.py route "describe project"   # FTS5 shortlist -> Jev -> ranking
+python3 router.py route "describe project"   # Jev remains the default
+python3 router.py route "describe project" --provider perplexity
+python3 router.py route "describe project" --provider both --out ranking.json
 python3 router.py selftest                   # offline check, no network
+python3 -m unittest discover -s tests -v     # offline provider and routing tests
 
 python3 scripts/eval_shortlist.py --show     # does the shortlist find the known-good skills?
 python3 scripts/rapport.py --dir <dir>       # HTML report from route JSON files
 ```
 
-`route --top 40` is the default: 40 candidates in **one** Jev call. Batching is the whole
-point — 21 questions in one call cost the same wall time as 1.
+On Windows, use `python` if `python3` is unavailable.
 
-Exact keys: `gh` needs no key (it uses your authenticated session), and `TYPESAFE_API_KEY`
-must be in the environment or at `~/.config/jev-loop/typesafe_api_key`. Both are read
-server-side by the tool and never written into the repo.
+`route --top 40` is the default: one request per selected provider. Larger
+shortlists are split into batches of at most 128 questions. In `both` mode the
+providers run concurrently against the same candidates, task state and rubric.
+
+`gh` uses your authenticated session for indexing. Provider keys are read locally
+and are never written into the repository or routing output:
+
+| Selection | Required credentials | Default model |
+|---|---|---|
+| `jev` | `TYPESAFE_API_KEY`, or `~/.config/jev-loop/typesafe_api_key` | `jev-latest` |
+| `perplexity` | `PERPLEXITY_API_KEY` | `pplx-decider-v1.1-27b` |
+| `both` | Both credentials, checked before requests start | Both models above |
+
+`--provider` overrides `SKILL_ROUTER_PROVIDER` (default `jev`). Use `--jev-model`
+or `--perplexity-model` to override `JEV_MODEL` or `PERPLEXITY_DECISION_MODEL`.
+Only the selected providers receive requests or require keys. `both` sends the
+task and candidate metadata to both services and uses both accounts.
+
+Perplexity uses the official [Decisions API](https://docs.perplexity.ai/docs/decisions/quickstart),
+not its search/chat endpoint. The adapter uses Python's standard library, with no
+new dependencies. Authentication errors fail immediately; transient errors use
+bounded retries and backoff. A rate-limit delay longer than 30 seconds fails for
+a later retry instead of retrying before the server allows it.
+
+## Combined ranking and output
+
+For `both`, a candidate needs a valid answer from **each** provider. Its combined
+`score` and `probabilities` are arithmetic means with equal weights. This is a
+transparent ranking policy, not a measured accuracy or calibration guarantee.
+
+Each accepted candidate includes `provider_scores` with the original score,
+confidence and probabilities. `score_disagreement` is the absolute difference
+between the scores (0 to 3). The compatibility `confidence` field is the lower
+provider confidence, labelled `confidence_kind: minimum_provider_confidence`;
+it is **not** confidence that the providers agree. Two confident providers can
+strongly disagree. Single-provider output labels it `provider_reported`.
+Combined console output also explains `conf` and shows disagreement as `delta`.
+
+The JSON output preserves `project`, `ranked`, and `rejected`, and adds
+`schema_version`, the chosen `provider`, the `aggregation` policy, and `providers`
+metadata (requested/resolved models, reported token usage, request IDs and calls).
+There is exactly one ranked or rejected record per candidate. A malformed answer
+is rejected with its provider's reason. A provider request failure fails the run
+without silently falling back; no valid candidates produces a nonzero exit.
+The existing HTML report continues to read the compatible ranking fields.
 
 ## What the measurement says
 
@@ -93,14 +143,16 @@ change needed. Unnumbered sections (e.g. *Flagged / excluded*) are ignored on pu
 
 ## The answer contract is enforced
 
-Type safety that is not enforced is only cosmetic. Every Jev answer is validated before it
+Type safety that is not enforced is only cosmetic. Every provider answer is validated before it
 counts: `type == "score"`, `probabilities` keyed exactly like the levels, every number
-finite in [0,1], sum within ±0.02 of 1, score inside the level range. Breaches are dropped
+finite in [0,1], sum within ±0.02 of 1, score inside the level range and consistent
+with the distribution within 0.05. Numeric strings and booleans are rejected. Breaches are dropped
 into `rejected` with the reason — they do not disappear quietly.
 
-Read `score` **together with** `probabilities` and `confidence`. From our own measurements:
-confidence below 0.5 → 19% right, above 0.9 → 98.8%. A score of 2.4 at confidence 0.35
-means "the model is split between two levels", not "2.4 is certain".
+Read `score` together with the distribution, provider confidence and, in `both`,
+disagreement. The earlier Jev confidence figures do not establish calibration for
+this skill corpus, Perplexity, or the ensemble. A score is an expected rubric
+level, not a probability that installing the skill is correct.
 
 ## Phase 2 — the 16 link lists
 
@@ -117,11 +169,21 @@ recommended skill is a separate decision: run it through a scanner
 (`NVIDIA/SkillSpector`, `cisco-ai-defense/skill-scanner`) before it reaches an agent. A
 third-party skill is a prompt-injection surface, not just a text file.
 
+## Optional Mefi Studio integration
+
+The [Studio integration plan](docs/studio-integration-plan.md) describes a
+disabled-by-default option: task → decision maker recommends → retrieve and
+validate → load approved instructions → worker executes. It includes an MCP
+adapter, a bounded skill cache, per-task loading and phased acceptance tests.
+These Studio components are **planned**, not implemented by this CLI change.
+Adding a connector alone does not install or activate recommended skills.
+
 ## Next step
 
-Rust-first: the MCP service itself is written in Rust (`reqwest` + `rusqlite`; Jev is
-called over HTTP — there is no Rust SDK). This Python file is the data pipeline that
-proves the loop; the port happens once the ranking is measured good enough.
+The repository currently ships the Python CLI. A Rust MCP service using
+`reqwest` and `rusqlite` remains a possible future implementation; both decision
+providers can be called over HTTP. The Studio plan starts with a thin adapter
+around the tested Python pipeline so a port is not a prerequisite.
 
 ## Repository language
 

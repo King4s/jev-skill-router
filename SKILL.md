@@ -1,13 +1,14 @@
 ---
 name: jev-skill-router
-description: Route a project to the best third-party skills with Jev.
+description: Recommend third-party skills with a decision maker like Jev, Perplexity Decisions, or both.
 ---
 
 # Jev Skill Router
 
 Find the skills a project should be built with, out of ~15.000 indexed across the
-ecosystem. Code retrieves candidates from a local SQLite FTS5 index; Jev (TypeSafe
-System One) scores them. The router **recommends** — it never installs.
+ecosystem. Code retrieves candidates from a local SQLite FTS5 index; a decision
+maker like Jev, Perplexity Decisions, or both scores them. The router
+**recommends** — it never installs or activates skills.
 
 ## When to Use
 
@@ -19,8 +20,8 @@ System One) scores them. The router **recommends** — it never installs.
 
 - Repo checked out at `~/jev-skill-router` (or wherever you cloned it).
 - `gh` authenticated — needed by `index`.
-- `TYPESAFE_API_KEY` in the environment, or the key at `~/.config/jev-loop/typesafe_api_key` —
-  needed by `route`.
+- For Jev: `TYPESAFE_API_KEY` or `~/.config/jev-loop/typesafe_api_key`.
+- For Perplexity: `PERPLEXITY_API_KEY`. For `both`: both credentials.
 - An index built at least once. If `skills.db` is missing, build it first.
 
 ## How to Run
@@ -31,12 +32,18 @@ Run `terminal` with the repo as working directory:
 python3 router.py stats                       # is the index there, and what's in it
 python3 router.py index                        # rebuild/refresh (~5 min, network)
 python3 router.py route "<project description>" --top 40
+python3 router.py route "<project description>" --provider perplexity
+python3 router.py route "<project description>" --provider both --out ranking.json
 python3 router.py selftest                     # offline check of the logic
+python3 -m unittest discover -s tests -v       # offline provider contract tests
 ```
 
 `route` accepts a free-text project description and prints a ranked table of
 `score`, `confidence`, skill name, tier and source repo. `--out path.json` writes the
-full result including rejected answers.
+full result including rejected answers and provider provenance. On Windows,
+use `python` if `python3` is unavailable. `--provider` overrides
+`SKILL_ROUTER_PROVIDER`; Jev is the default. Model overrides are `--jev-model`
+and `--perplexity-model`, or `JEV_MODEL` and `PERPLEXITY_DECISION_MODEL`.
 
 ## Quick Reference
 
@@ -44,7 +51,7 @@ full result including rejected answers.
 |---|---|
 | `router.py index` | Harvests frontmatter from every repo in `Skills-list.md`, dedupes, rebuilds FTS5 |
 | `router.py stats` | Counts per tier and repo; lists sources carrying no skills |
-| `router.py route "<text>"` | FTS5 shortlist → one Jev call → ranked skills |
+| `router.py route "<text>" --provider jev\|perplexity\|both` | FTS5 shortlist → chosen decision makers → ranked skills |
 | `router.py selftest` | Asserts frontmatter folding, dedupe, FTS5 and the answer contract |
 
 ## Procedure
@@ -52,15 +59,20 @@ full result including rejected answers.
 1. Check `stats`. No rows → run `index` first (it needs network and takes minutes).
 2. Write the project description concretely: stack, deliverable, constraints. Vague input
    gives vague candidates — the FTS5 shortlist is only as good as the words in it.
-3. Run `route`. Read `score` alongside `confidence`, never the score alone.
+3. Use the provider the user selected. Run `route`; inspect score, each provider's
+   confidence, and disagreement. Both mode requires two valid answers per candidate,
+   averages scores/distributions, and keeps the original provider observations.
+   Its compatibility confidence is the minimum provider confidence, not consensus.
+   Never substitute a different provider when the selected one fails.
 4. For the top candidates, read the skill's `SKILL.md` before trusting it — the index holds
    a name, a description and a URL, not the skill's content.
 5. Installing one is a separate decision: scan it first (`NVIDIA/SkillSpector`).
 
 ## Pitfalls
 
-- **`score` alone is not a verdict.** A 2,4 at confidence 0,35 means Jev is split between two
-  levels. Our calibration: confidence below 0,5 → 19 % right; above 0,9 → 98,8 %.
+- **`score` alone is not a verdict.** Provider confidence is not calibrated on this
+  corpus. Combined confidence is labelled `minimum_provider_confidence`, not a
+  probability of agreement; read `score_disagreement` and `provider_scores` too.
 - **The index is a snapshot.** Skills get edited upstream; `index` again before a decision
   that matters.
 - **Duplicate skills are normal.** Copies live in many awesome-lists; only the first
