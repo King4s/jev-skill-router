@@ -37,6 +37,15 @@ def bar(score: float, conf: float) -> str:
             f'opacity:{0.35 + 0.65 * conf:.2f}"></span></span>')
 
 
+def read_json(path: Path):
+    """New routing files use UTF-8; older Windows output used CP1252."""
+    try:
+        text = path.read_text(encoding="utf-8-sig")
+    except UnicodeDecodeError:
+        text = path.read_text(encoding="cp1252")
+    return json.loads(text)
+
+
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--dir", default=".")
@@ -50,7 +59,7 @@ def main() -> int:
         f = d / f"{name}.json"
         if not f.exists():
             continue
-        data = json.loads(f.read_text())
+        data = read_json(f)
         ranked, rejected = data["ranked"], data.get("rejected", [])
         got = [r["name"] for r in ranked]
         hits = [w for w in want if w in got]
@@ -60,22 +69,39 @@ def main() -> int:
         for i, r in enumerate(ranked[:8], 1):
             hit = "hit" if r["name"] in want else ""
             warn = " low" if r["confidence"] < 0.35 else ""
+            used = r.get("used_providers", [])
+            source = f'<span class="repo">Using: {html.escape(", ".join(used))}</span>' if used else ""
             rows.append(
                 f'<tr class="{hit}"><td class="n">{i}</td>'
                 f'<td class="nm">{html.escape(r["name"])}'
                 f'<span class="tier" style="color:{TIER_COLOR.get(r["tier"], "")}">'
-                f'{r["tier"]}</span><span class="repo">{html.escape(r["repo"])}</span></td>'
+                f'{r["tier"]}</span><span class="repo">{html.escape(r["repo"])}</span>{source}</td>'
                 f'<td class="sc">{r["score"]:.2f}</td><td>{bar(r["score"], r["confidence"])}</td>'
                 f'<td class="cf{warn}">{r["confidence"]:.2f}</td></tr>')
         miss = [w for w in want if w not in got]
+        requested = html.escape(str(data.get("provider", "jev")))
+        provider = html.escape(", ".join(data["used_providers"]) or "none") if "used_providers" in data else requested
+        confidence_note = (" · two valid answers: minimum provider confidence, not consensus; "
+                           "one valid answer: provider-reported confidence") if data.get("provider") == "both" else ""
+        if data.get("aggregation") == "priority_failover":
+            confidence_note = " · preferred provider first; confidence is provider-reported confidence"
+        routing_note = ""
+        if "used_providers" in data:
+            used = html.escape(", ".join(data["used_providers"]) or "none")
+            status = html.escape(str(data.get("status", "unknown")))
+            fallback = ""
+            if data.get("status") == "degraded":
+                fallback = " · fallback used" if any(row.get("is_fallback", row.get("aggregation") == "single") for row in ranked) else " · incomplete provider coverage"
+            routing_note = f" · Requested mode: {requested} · Routing status: {status} · Providers used: {used}{fallback}"
         cards.append(f"""<section class="card">
 <h3>{html.escape(label)}</h3>
+<p class="sub">Decision maker: {provider}{routing_note}{confidence_note}</p>
 <p class="verd">Found <b>{len(hits)} of {len(want)}</b> facit skills in the top 40.
 {'<span class="miss">Missing: ' + html.escape(', '.join(miss)) + '</span>' if miss else '<span class="ok">All facit skills found</span>'}
-{'· ' + str(len(rejected)) + ' answers dropped on contract breach' if rejected else ''}</p>
+{'· ' + str(len(rejected)) + ' candidates have no valid provider score' if rejected else ''}</p>
 <table>{''.join(rows)}</table></section>""")
 
-    rules = json.loads((d / "regler.json").read_text()) if (d / "regler.json").exists() else {}
+    rules = read_json(d / "regler.json") if (d / "regler.json").exists() else {}
     rule_rows = "".join(
         f'<tr><td>{k}</td><td class="sc">{v["hit"]}/{v["want"]}</td>'
         f'<td>{100 * v["hit"] // v["want"]}%</td><td class="note">{html.escape(v["note"])}</td></tr>'
@@ -114,9 +140,9 @@ def main() -> int:
           padding: 0 3px; border-radius: 3px; }}
 </style>
 <h1>Jev Skill Router — does the ranking hold up on real projects?</h1>
-<p class="sub">Measured 2026-10-04 · corpus: 10,656 unique skills from 98 sources ·
+<p class="sub">Historical Jev baseline, measured 2026-10-04 · corpus: 10,656 unique skills from 98 sources ·
 each project: FTS5 shortlist of 40 → one Jev call scoring all 40 · 0.5 s per project.
-Raw route output in the same directory.</p>
+Current ranking providers are identified on each card. Raw route output in the same directory.</p>
 
 <h2>1. What was measured, and on what data</h2>
 <p class="sub">Four project descriptions, each with a hand-written list of skills that <i>should</i>
@@ -149,7 +175,7 @@ their measurements; treat ours as unvalidated until measured here.</li>
 what they point at is not in this corpus.</li>
 </ul>
 </html>"""
-    out.write_text(doc)
+    out.write_text(doc, encoding="utf-8")
     print(f"written: {out}  ({len(doc)} chars)")
     return 0
 

@@ -1,5 +1,8 @@
-# Indekset er afledt data — genopbygges med `router.py index`.
+# The index is derived data; rebuild it with `router.py index`.
 skills.db
 skills.db-journal
 *.json.tmp
 __pycache__/
+.env
+.env.*
+!.env.example
