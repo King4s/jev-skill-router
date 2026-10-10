@@ -21,7 +21,8 @@ maker like Jev, Perplexity Decisions, or both scores them. The router
 - Repo checked out at `~/jev-skill-router` (or wherever you cloned it).
 - `gh` authenticated — needed by `index`.
 - For Jev: `TYPESAFE_API_KEY` or `~/.config/jev-loop/typesafe_api_key`.
-- For Perplexity: `PERPLEXITY_API_KEY`. For `both`: both credentials.
+- For Perplexity: `PERPLEXITY_API_KEY`. For `both`: at least one usable provider
+  credential; configuring both enables combined ranking when both are available.
 - An index built at least once. If `skills.db` is missing, build it first.
 
 ## How to Run
@@ -59,11 +60,13 @@ and `--perplexity-model`, or `JEV_MODEL` and `PERPLEXITY_DECISION_MODEL`.
 1. Check `stats`. No rows → run `index` first (it needs network and takes minutes).
 2. Write the project description concretely: stack, deliverable, constraints. Vague input
    gives vague candidates — the FTS5 shortlist is only as good as the words in it.
-3. Use the provider the user selected. Run `route`; inspect score, each provider's
-   confidence, and disagreement. Both mode requires two valid answers per candidate,
-   averages scores/distributions, and keeps the original provider observations.
-   Its compatibility confidence is the minimum provider confidence, not consensus.
-   Never substitute a different provider when the selected one fails.
+3. Use the provider mode the user selected. Run `route`; inspect status, provider
+   errors, score, confidence, and available disagreement. In `both`, use the other
+   provider automatically if one is unavailable or errors. Keep valid earlier
+   batch answers and stop further requests to a failed provider. Average two valid
+   scores/distributions; use a single valid answer unchanged, and reject only when
+   neither is valid. Each ranked candidate identifies its `used_providers` and
+   `aggregation`. Explicit `jev` or `perplexity` modes remain strict selections.
 4. For the top candidates, read the skill's `SKILL.md` before trusting it — the index holds
    a name, a description and a URL, not the skill's content.
 5. Installing one is a separate decision: scan it first (`NVIDIA/SkillSpector`).
@@ -71,8 +74,13 @@ and `--perplexity-model`, or `JEV_MODEL` and `PERPLEXITY_DECISION_MODEL`.
 ## Pitfalls
 
 - **`score` alone is not a verdict.** Provider confidence is not calibrated on this
-  corpus. Combined confidence is labelled `minimum_provider_confidence`, not a
-  probability of agreement; read `score_disagreement` and `provider_scores` too.
+  corpus. Two-provider confidence is labelled `minimum_provider_confidence`, not
+  a probability of agreement. Single-answer confidence is `provider_reported`,
+  with `score_disagreement: null`. Read `provider_scores` and `used_providers` too.
+- **Degraded routing can still succeed.** In `both`, an unavailable provider does
+  not block valid recommendations from the other. Report the fallback status and
+  error; never fabricate a missing observation. No valid ranking means a nonzero
+  CLI exit, with a structured result preserved when `--out` is supplied.
 - **The index is a snapshot.** Skills get edited upstream; `index` again before a decision
   that matters.
 - **Duplicate skills are normal.** Copies live in many awesome-lists; only the first

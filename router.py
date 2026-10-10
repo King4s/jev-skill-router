@@ -428,21 +428,30 @@ def validate_score(ans: dict, levels: int) -> str | None:
 
 def score_candidates(project: str, cands: list[dict], provider: str = "jev",
                      jev_model: str | None = None, perplexity_model: str | None = None) -> dict:
-    """Rank one shared shortlist; no installation and no hidden provider fallback."""
+    """Rank candidates; both mode uses every available valid provider observation."""
     if provider not in ("jev", "perplexity", "both"):
         raise ProviderError("Choose a decision provider: jev, perplexity, or both.")
     if not isinstance(project, str) or not project.strip():
         raise ProviderError("The project description must not be empty.")
     names = ["jev", "perplexity"] if provider == "both" else [provider]
     overrides = {"jev": jev_model, "perplexity": perplexity_model}
-    models = {name: resolve_model(name, overrides[name]) for name in names}
     result = {"schema_version": 1, "project": project, "provider": provider,
-              "aggregation": "equal_mean" if provider == "both" else "single",
+              "aggregation": "equal_mean_with_fallback" if provider == "both" else "single",
+              "status": "unavailable", "used_providers": [],
               "providers": {}, "ranked": [], "rejected": []}
-    if cands:
-        # An absent second credential must not cause a paid first-provider request.
-        for name in names:
-            provider_key(name)
+    for name in names:
+        metadata = {"requested_model": None, "resolved_models": [], "status": "complete",
+                    "calls": 0, "attempted_calls": 0, "request_ids": [],
+                    "usage": {"input_tokens": None, "output_tokens": None}}
+        try:
+            metadata["requested_model"] = resolve_model(name, overrides[name])
+            if cands:
+                provider_key(name)
+        except ProviderError as error:
+            if provider != "both":
+                raise
+            metadata.update(status="unavailable", error=str(error))
+        result["providers"][name] = metadata
     state = {"project": {"spec": project},
              "note": "Pick the level that matches how the candidate applies to THIS project."}
     questions = {}
@@ -460,15 +469,25 @@ def score_candidates(project: str, cands: list[dict], provider: str = "jev",
         }
     def score_provider(name):
         answers = {}
-        metadata = {"requested_model": models[name], "resolved_models": [],
-                    "calls": 0, "request_ids": [],
-                    "usage": {"input_tokens": None, "output_tokens": None}}
+        metadata = result["providers"][name]
+        if metadata["status"] == "unavailable":
+            return answers, metadata
         usage_counts = {field: 0 for field in metadata["usage"]}
         items = list(questions.items())
         for start in range(0, len(items), MAX_QUESTIONS):
-            raw = decision_call(name, state, dict(items[start:start + MAX_QUESTIONS]), model=models[name])
-            if not isinstance(raw, dict) or not isinstance(raw.get("answers"), dict):
-                raise ProviderError(f"{name} returned an invalid answers envelope.")
+            metadata["attempted_calls"] += 1
+            try:
+                raw = decision_call(name, state, dict(items[start:start + MAX_QUESTIONS]),
+                                    model=metadata["requested_model"])
+                if not isinstance(raw, dict) or not isinstance(raw.get("answers"), dict):
+                    raise ProviderError(f"{name} returned an invalid answers envelope.")
+            except Exception as error:
+                reason = str(error) if isinstance(error, ProviderError) else f"{name} request failed unexpectedly."
+                if provider != "both":
+                    raise ProviderError(reason) from None
+                metadata.update(status="partial" if metadata["calls"] else "error", error=reason)
+                # Preserve earlier results, stop this provider, and let the other finish.
+                break
             # Keep only this batch's question IDs, even if a response includes extras.
             for key, _ in items[start:start + MAX_QUESTIONS]:
                 if key in raw["answers"]:
@@ -490,7 +509,7 @@ def score_candidates(project: str, cands: list[dict], provider: str = "jev",
                         metadata["usage"][field] = (metadata["usage"][field] or 0) + count
                         usage_counts[field] += 1
         for field, count in usage_counts.items():
-            if count != metadata["calls"]:
+            if count != metadata["calls"] or metadata["attempted_calls"] != metadata["calls"]:
                 metadata["usage"][field] = None
         return answers, metadata
 
@@ -505,27 +524,34 @@ def score_candidates(project: str, cands: list[dict], provider: str = "jev",
         provider_scores, errors = {}, {}
         for name in names:
             answer = observations[name][0].get(f"skill_{i:03d}")
-            error = validate_score(answer, len(LEVELS))
+            error = (result["providers"][name].get("error") if answer is None else None) or validate_score(answer, len(LEVELS))
             if error:
                 errors[name] = error
             else:
                 provider_scores[name] = {"score": float(answer["score"]),
                                          "confidence": float(answer["confidence"]),
                                          "probabilities": {key: float(value) for key, value in answer["probabilities"].items()}}
-        if errors:
+        if not provider_scores:
             result["rejected"].append({**c, "error": "; ".join(f"{name}: {error}" for name, error in errors.items()),
                                        "provider_errors": errors, "provider_scores": provider_scores})
             continue
         scores = list(provider_scores.values())
         result["ranked"].append({**c,
+            "used_providers": list(provider_scores), "provider_errors": errors,
+            "aggregation": "equal_mean" if len(scores) == 2 else "single",
             "score": math.fsum(answer["score"] for answer in scores) / len(scores),
             "confidence": min(answer["confidence"] for answer in scores),
-            "confidence_kind": "minimum_provider_confidence" if provider == "both" else "provider_reported",
+            "confidence_kind": "minimum_provider_confidence" if len(scores) == 2 else "provider_reported",
             "probabilities": {str(level): math.fsum(answer["probabilities"][str(level)] for answer in scores) / len(scores)
                               for level in range(len(LEVELS))},
             "provider_scores": provider_scores,
-            "score_disagreement": abs(scores[0]["score"] - scores[-1]["score"])})
+            "score_disagreement": abs(scores[0]["score"] - scores[-1]["score"]) if len(scores) == 2 else None})
     result["ranked"].sort(key=lambda row: (-row["score"], -row["confidence"]))
+    result["used_providers"] = [name for name in names if any(name in row["provider_scores"] for row in result["ranked"])]
+    if result["ranked"]:
+        degraded = provider == "both" and (any(meta["status"] != "complete" for meta in result["providers"].values())
+                                           or any(row["provider_errors"] for row in result["ranked"] + result["rejected"]))
+        result["status"] = "degraded" if degraded else "complete"
     return result
 
 
@@ -549,13 +575,21 @@ def cmd_route(args) -> int:
     ranked, rejected = result["ranked"], result["rejected"]
 
     if provider == "both":
-        print("[both] conf is minimum provider confidence, not consensus; delta is score disagreement.")
+        print("[both] two valid answers: minimum provider confidence, not consensus; one valid answer: provider-reported confidence.")
+        print("[both] delta is score disagreement; '-' means only one provider supplied a valid score.")
+        if result["status"] != "complete":
+            used = ", ".join(result["used_providers"]) or "none"
+            print(f"[both] {result['status']}; using providers: {used}. Fallback results are identified per candidate.")
+            for name, metadata in result["providers"].items():
+                if metadata.get("error"):
+                    print(f"[both] {name}: {metadata['error']}")
     print(f"\n{'score':>5} {'conf':>5}" + (f" {'delta':>5}" if provider == "both" else "") + "  skill")
     for r in ranked[:args.show]:
-        delta = f" {r['score_disagreement']:5.2f}" if provider == "both" else ""
-        print(f"{r['score']:5.2f} {r['confidence']:5.2f}{delta}  {r['name']}  [{r['tier']}] {r['repo']}")
+        delta = (f" {r['score_disagreement']:5.2f}" if r["score_disagreement"] is not None else f" {'-':>5}") if provider == "both" else ""
+        source = f" (using {', '.join(r['used_providers'])})" if provider == "both" else ""
+        print(f"{r['score']:5.2f} {r['confidence']:5.2f}{delta}  {r['name']}  [{r['tier']}] {r['repo']}{source}")
     if rejected:
-        print(f"\n{len(rejected)} answers dropped on contract breach "
+        print(f"\n{len(rejected)} candidates rejected without a valid provider score "
               f"(first: {rejected[0]['name']}: {rejected[0]['error']})")
     if args.out:
         Path(args.out).write_text(json.dumps(result, indent=1, ensure_ascii=False, allow_nan=False), encoding="utf-8")

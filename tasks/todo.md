@@ -10,3 +10,6 @@
 - [x] Run full offline verification and independent code review; resolve findings.
 - [x] Verify real Jev and Perplexity responses with a synthetic task.
 - [x] Prepare reviewed commits for delivery of the code and plan.
+- [x] Make both mode continue with the other provider when one is unavailable or errors.
+- [x] Cover partial batches, candidate-level fallback, and complete failure artifacts.
+- [x] Update report labels and the optional Studio plan to use the fallback policy.

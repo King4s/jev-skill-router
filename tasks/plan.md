@@ -15,14 +15,24 @@ work. All new code, documentation, test names and commits are in English.
   and `PERPLEXITY_API_KEY`. Send keys only to their fixed HTTPS endpoint.
 - `--provider jev|perplexity|both` overrides `SKILL_ROUTER_PROVIDER`; default `jev`.
   Explicit per-provider model options override their environment defaults.
-- Both providers receive identical candidates, task state and rubric. Batch at
-  128 questions to respect the Perplexity limit; call both providers concurrently.
-- In `both`, only candidates validated by both providers enter the ranking.
-  Scores and distributions are arithmetic means; confidence is the lower provider
-  confidence, labelled as such, not a calibrated consensus estimate. Retain each
-  provider's original observations and report absolute score disagreement.
-- A provider request failure fails the requested mode without switching providers.
-  Invalid candidate answers are recorded in `rejected`; preserve candidate counts.
+- In `both`, attempt configured, usable providers concurrently, using a common
+  task state and rubric. Batch at 128 questions to respect the Perplexity limit.
+  At least one usable credential is sufficient. Record missing/invalid key or
+  model configuration and continue with the other provider.
+- In `both`, a candidate needs at least one valid answer. Average two valid
+  scores/distributions equally; otherwise retain the single valid answer. Label
+  candidate `aggregation` as `equal_mean` or `single`, and record `used_providers`.
+  Confidence is `minimum_provider_confidence` for two answers and
+  `provider_reported` for one. Disagreement is the absolute score difference for
+  two answers and unavailable (`null`) for one; neither policy proves calibration.
+- After a provider request fails, keep its valid earlier batch observations and
+  stop its further requests. The other provider continues over the full shortlist.
+  Reject a candidate only when neither provider has a valid answer; record reasons.
+- Explicit `jev` and `perplexity` modes remain strict. Record per-provider
+  status/error and route `status: complete|degraded|unavailable`, retaining the
+  requested mode separately from `used_providers`. Degraded fallback is successful
+  routing. No valid ranking produces a nonzero CLI exit; `--out` still writes the
+  structured rejection/provenance result. Preserve candidate counts.
 - Keep `project`, `ranked`, `rejected`, `score`, `confidence`, and `probabilities`
   compatible with the existing report reader. Add provider and request provenance.
 - Validate external containers, finite numbers, rubric keys and probability sums.
@@ -37,9 +47,13 @@ work. All new code, documentation, test names and commits are in English.
    Verification: `python -m unittest discover -s tests -v` and original selftest.
 2. **Selection and combined ranking** (depends on 1).
    Add CLI options, batch scoring, provider metadata and explicit combined policy.
-   Acceptance: all three modes work; same rubric/candidates; each candidate is
-   ranked or rejected; provider failures never cause silent fallback.
-   Verification: offline route/CLI fixtures for all modes and more than 128 skills.
+   Acceptance: all three modes work; each candidate is ranked or rejected; `both`
+   survives missing configuration, request failure, and invalid individual answers
+   whenever another valid answer exists, with explicit fallback provenance.
+   Acceptance: a later batch failure retains earlier answers, stops that provider,
+   and lets the other finish; neither usable provider yields structured failure.
+   Verification: offline route/CLI fixtures for all modes, one/both-provider
+   failures, candidate-level invalid answers, and more than 128 skills.
 3. **Documentation and Studio plan** (depends on the contracts above).
    Update usage, skill instructions and change notes; document Studio's optional
    disabled-by-default integration phases with source links and acceptance gates.

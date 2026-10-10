@@ -69,22 +69,34 @@ def main() -> int:
         for i, r in enumerate(ranked[:8], 1):
             hit = "hit" if r["name"] in want else ""
             warn = " low" if r["confidence"] < 0.35 else ""
+            used = r.get("used_providers", [])
+            source = f'<span class="repo">Using: {html.escape(", ".join(used))}</span>' if used else ""
             rows.append(
                 f'<tr class="{hit}"><td class="n">{i}</td>'
                 f'<td class="nm">{html.escape(r["name"])}'
                 f'<span class="tier" style="color:{TIER_COLOR.get(r["tier"], "")}">'
-                f'{r["tier"]}</span><span class="repo">{html.escape(r["repo"])}</span></td>'
+                f'{r["tier"]}</span><span class="repo">{html.escape(r["repo"])}</span>{source}</td>'
                 f'<td class="sc">{r["score"]:.2f}</td><td>{bar(r["score"], r["confidence"])}</td>'
                 f'<td class="cf{warn}">{r["confidence"]:.2f}</td></tr>')
         miss = [w for w in want if w not in got]
-        provider = html.escape(str(data.get("provider", "jev")))
-        confidence_note = " · confidence is minimum provider confidence, not consensus" if data.get("provider") == "both" else ""
+        requested = html.escape(str(data.get("provider", "jev")))
+        provider = html.escape(", ".join(data["used_providers"]) or "none") if "used_providers" in data else requested
+        confidence_note = (" · two valid answers: minimum provider confidence, not consensus; "
+                           "one valid answer: provider-reported confidence") if data.get("provider") == "both" else ""
+        routing_note = ""
+        if "used_providers" in data:
+            used = html.escape(", ".join(data["used_providers"]) or "none")
+            status = html.escape(str(data.get("status", "unknown")))
+            fallback = ""
+            if data.get("status") == "degraded":
+                fallback = " · fallback used" if any(row.get("aggregation") == "single" for row in ranked) else " · incomplete provider coverage"
+            routing_note = f" · Requested mode: {requested} · Routing status: {status} · Providers used: {used}{fallback}"
         cards.append(f"""<section class="card">
 <h3>{html.escape(label)}</h3>
-<p class="sub">Decision maker: {provider}{confidence_note}</p>
+<p class="sub">Decision maker: {provider}{routing_note}{confidence_note}</p>
 <p class="verd">Found <b>{len(hits)} of {len(want)}</b> facit skills in the top 40.
 {'<span class="miss">Missing: ' + html.escape(', '.join(miss)) + '</span>' if miss else '<span class="ok">All facit skills found</span>'}
-{'· ' + str(len(rejected)) + ' answers dropped on contract breach' if rejected else ''}</p>
+{'· ' + str(len(rejected)) + ' candidates have no valid provider score' if rejected else ''}</p>
 <table>{''.join(rows)}</table></section>""")
 
     rules = read_json(d / "regler.json") if (d / "regler.json").exists() else {}

@@ -4,10 +4,13 @@ Date: 2026-10-10. Runtime: Python 3.13 on Windows.
 
 ## Offline checks
 
-- `python -m unittest discover -s tests -v`: **46 tests pass**, covering provider transport, response
+- `python -m unittest discover -s tests -v`: **60 tests pass**, covering provider transport, response
   validation, all three routing modes, concurrent calls, batching, metadata,
   missing credentials, malformed answers, model precedence, and CLI compatibility.
   Report subprocess tests cover UTF-8 output and legacy Windows CP1252 files.
+  Fallback tests cover unavailable configuration, errors in either provider,
+  malformed envelopes, invalid candidate answers, preserved earlier batches,
+  complete failure artifacts, and actual-provider labels in the console/report.
 - `python router.py selftest`: existing frontmatter, dedupe, source parsing,
   retrieval and score-contract checks.
 - `python -m py_compile router.py decision_providers.py scripts/eval_shortlist.py scripts/rapport.py`.
@@ -21,6 +24,12 @@ index is not in a fresh clone, and retrieval behavior was not changed.
 Independent review identified HTTP protocol exceptions, deeply nested JSON, and
 Windows report encoding as edge cases. Regression tests were added before the
 fixes; all findings were resolved and the reviewer found no remaining blockers.
+
+After the fallback policy was revised, both mode was tested with injected failures:
+two valid observations combine; one valid observation succeeds with degraded
+status and its provider identified; no valid observation remains unavailable.
+Explicit single-provider selections still fail when their selected service fails.
+These failure tests are offline and do not deliberately disrupt a live service.
 
 ## Live provider smoke check
 

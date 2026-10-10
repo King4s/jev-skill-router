@@ -15,7 +15,7 @@ four-level relevance rubric, with their own reported confidence.
 Skills-list.md ──► index ──► skills.db (SQLite FTS5) ──► route ──► ranking
                 GitHub API   18k rows, 0 deps            FTS5 prefilter
                                                          └─► Jev / Perplexity / both
-                                                              one Score per candidate per provider
+                                                              validated scores from available providers
 ```
 
 ## Measured (2026-10-04)
@@ -58,8 +58,11 @@ python3 scripts/rapport.py --dir <dir>       # HTML report from route JSON files
 On Windows, use `python` if `python3` is unavailable.
 
 `route --top 40` is the default: one request per selected provider. Larger
-shortlists are split into batches of at most 128 questions. In `both` mode the
-providers run concurrently against the same candidates, task state and rubric.
+shortlists are split into batches of at most 128 questions. In `both` mode,
+configured, usable providers run concurrently. If one is unavailable or errors,
+the other continues scoring the shortlist automatically. Valid answers from
+earlier batches are retained if a provider later fails; that provider receives no
+further requests in the run.
 
 `gh` uses your authenticated session for indexing. Provider keys are read locally
 and are never written into the repository or routing output:
@@ -68,12 +71,14 @@ and are never written into the repository or routing output:
 |---|---|---|
 | `jev` | `TYPESAFE_API_KEY`, or `~/.config/jev-loop/typesafe_api_key` | `jev-latest` |
 | `perplexity` | `PERPLEXITY_API_KEY` | `pplx-decider-v1.1-27b` |
-| `both` | Both credentials, checked before requests start | Both models above |
+| `both` | At least one usable provider credential; unavailable providers are reported and skipped | Available models above |
 
 `--provider` overrides `SKILL_ROUTER_PROVIDER` (default `jev`). Use `--jev-model`
 or `--perplexity-model` to override `JEV_MODEL` or `PERPLEXITY_DECISION_MODEL`.
-Only the selected providers receive requests or require keys. `both` sends the
-task and candidate metadata to both services and uses both accounts.
+Only the selected providers receive requests. Explicit `jev` and `perplexity`
+selections require the chosen provider and never switch services. `both` sends
+the task and candidate metadata to each configured, usable service and uses its
+account; a missing or invalid key/model is reported without blocking the other.
 
 Perplexity uses the official [Decisions API](https://docs.perplexity.ai/docs/decisions/quickstart),
 not its search/chat endpoint. The adapter uses Python's standard library, with no
@@ -83,24 +88,38 @@ a later retry instead of retrying before the server allows it.
 
 ## Combined ranking and output
 
-For `both`, a candidate needs a valid answer from **each** provider. Its combined
-`score` and `probabilities` are arithmetic means with equal weights. This is a
-transparent ranking policy, not a measured accuracy or calibration guarantee.
+For `both`, a candidate needs a valid answer from **at least one** provider. When
+both answers are valid, its `score` and `probabilities` are arithmetic means with
+equal weights (`aggregation: equal_mean`). When only one is valid, the router uses
+that provider's original answer (`aggregation: single`); no missing score is
+invented or averaged as zero. A candidate is rejected only if neither answer is
+valid. This is a transparent ranking policy, not a measured accuracy or
+calibration guarantee.
 
 Each accepted candidate includes `provider_scores` with the original score,
-confidence and probabilities. `score_disagreement` is the absolute difference
-between the scores (0 to 3). The compatibility `confidence` field is the lower
-provider confidence, labelled `confidence_kind: minimum_provider_confidence`;
-it is **not** confidence that the providers agree. Two confident providers can
-strongly disagree. Single-provider output labels it `provider_reported`.
-Combined console output also explains `conf` and shows disagreement as `delta`.
+confidence and probabilities, plus `used_providers` and the candidate's
+`aggregation` policy. With two valid answers, `score_disagreement` is the absolute
+difference between the scores (0 to 3), and the compatibility `confidence` field
+is the lower provider confidence, labelled
+`confidence_kind: minimum_provider_confidence`. This is not confidence that the
+providers agree. With one valid answer, confidence is `provider_reported`, and
+disagreement is unavailable (`null`). The console identifies provider use and
+shows available disagreement as `delta`.
 
 The JSON output preserves `project`, `ranked`, and `rejected`, and adds
-`schema_version`, the chosen `provider`, the `aggregation` policy, and `providers`
-metadata (requested/resolved models, reported token usage, request IDs and calls).
-There is exactly one ranked or rejected record per candidate. A malformed answer
-is rejected with its provider's reason. A provider request failure fails the run
-without silently falling back; no valid candidates produces a nonzero exit.
+`schema_version`, the requested `provider`, `used_providers`, the aggregation
+policy, and `providers` metadata (status/error, requested/resolved models,
+reported token usage, request IDs and calls). The route-level `aggregation` is
+`equal_mean_with_fallback` for `both`; each candidate states which rule actually
+applied. The route's `status` is `complete` when valid ranking is available without
+provider fallback, `degraded` when `both` retains valid ranking with incomplete
+provider coverage, or `unavailable` when no valid ranking is available. A degraded
+route succeeds with explicitly reported fallback.
+
+There is exactly one ranked or rejected record per candidate. Invalid answers and
+provider failures remain visible with their reasons, even when the other provider
+saves the candidate. If neither provider supplies valid answers, the CLI exits
+nonzero; `--out` still writes the structured rejection and provenance result.
 The existing HTML report continues to read the compatible ranking fields.
 
 ## What the measurement says
