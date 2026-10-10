@@ -65,7 +65,8 @@ Proposed project settings, with optional per-task overrides:
 | Setting | Initial behavior |
 |---|---|
 | Enable automatic skill routing | Off |
-| Decision maker | `jev`, `perplexity`, or `both`; `both` automatically uses the available provider when one fails |
+| Decision maker | `jev`, `perplexity`, or `both`; `both` uses ordered failover |
+| Provider priority | Higher measured accuracy first; lower measured cost breaks exact accuracy ties. Default external profile starts with Perplexity, then Jev. |
 | Operation | Recommend only, or prepare and activate |
 | Allowed skill sources | User-configured repositories and paths |
 | Maximum additional skills | Three initially; within the remaining Studio limits |
@@ -76,7 +77,9 @@ Proposed project settings, with optional per-task overrides:
 Studio's provider setting maps to the CLI's `--provider jev|perplexity|both`.
 `SKILL_ROUTER_PROVIDER` supplies the CLI default, which is `jev`. Model overrides
 map to `--jev-model` / `JEV_MODEL` and `--perplexity-model` /
-`PERPLEXITY_DECISION_MODEL`.
+`PERPLEXITY_DECISION_MODEL`. Priority profile selection maps to
+`--priority-profile`, overriding `SKILL_ROUTER_PRIORITY_PROFILE`, with
+`provider-priority.json` as the shipped default.
 
 Credentials stay on the device in the existing connector secret/environment
 mechanism. Jev needs `TYPESAFE_API_KEY`; Perplexity needs `PERPLEXITY_API_KEY`; `both`
@@ -94,41 +97,57 @@ approval for the same authorized preparation.
 
 ## Decision-maker contract
 
-The shortlist is generated once. In `both` mode, attempt configured, usable
-providers concurrently against a common task state, instructions, and four-level
-rubric. If one is unavailable or errors, use the other automatically. A provider
-that fails a later batch keeps its earlier valid observations but receives no
-further requests; the other continues over the full shortlist. Explicit `jev` and
-`perplexity` modes require the selected service and remain strict.
+The shortlist is generated once. In `both`, use the preferred provider first.
+Higher measured accuracy controls priority; lower measured cost per candidate
+breaks exact accuracy ties. The profile must be valid and match the requested
+models. Without comparable quality evidence, disclose a provisional price/default
+order rather than treating unknown accuracy as equal quality.
+
+The shipped profile starts with **Perplexity → Jev** from DecisionBench's external
+choice evaluation: 94.49% versus 92.44% observed accuracy over 1,071 rows, with
+estimated costs of $0.01698 versus $0.04322 per 1,000 rows. These are provisional
+ordering inputs, not skill-routing accuracy measurements. The Perplexity benchmark
+run used OpenRouter; the router calls Perplexity directly. Accuracy intervals
+overlap, so observed priority is not a claim of universal superiority.
+[Published benchmark data](https://decisionbench.ai/data.json),
+[evaluation protocol](https://decisionbench.ai/protocol.txt), and
+[Perplexity announcement](https://community.perplexity.ai/t/pplx-decider-v1-1-27b-scores-the-highest-on-decision-bench-for-accuracy-with-the-lowest-cost/6312).
+
+The profile records model identities, source, sample count, accuracy, and
+`cost_per_candidate_usd`. Replace it with model-matched skill-routing measurements
+when available. Current input-token rates are $0.02 per million for Perplexity and
+$0.042 per million for Jev, with free output tokens, but request cost also depends
+on token usage, batching, and failed attempts. Prices and measurements can change.
+[Perplexity pricing](https://docs.perplexity.ai/docs/decisions/quickstart#pricing),
+[TypeSafe models](https://docs.typesafe.ai/models).
+
+Call fallback only if the preferred provider is unavailable, errors, or leaves
+missing/malformed answers. Send only unresolved candidate IDs; do not rescore
+accepted candidates. A healthy preferred provider means no call to the other.
+Disable request retries in `both` to move to fallback after a failed call. A
+provider that fails later keeps its earlier valid observations but receives no
+further requests. Explicit `jev` and `perplexity` modes remain strict selections.
 
 Perplexity Decisions provides ordered `score` answers with probabilities and
 confidence, which can be validated against the router's common score contract.
 [Perplexity Decisions quickstart](https://docs.perplexity.ai/docs/decisions/quickstart#score-a-level-on-an-ordered-rubric).
 
-For candidates with valid answers from both providers:
-
-- Aggregate score: `(jev_score + perplexity_score) / 2`.
-- Aggregate probability for each level: the equal arithmetic mean of the two
-  validated probabilities for that level.
-- Keep each provider's score, confidence, probabilities, model, and request metadata.
-- Expose `score_disagreement` as the absolute difference between the provider scores.
-- If a top-level confidence is needed, use the minimum provider confidence and label
-  it `confidence_kind: minimum_provider_confidence`. This is a selection policy,
-  not a calibrated probability that the combined result is correct.
-- Label the candidate `aggregation: equal_mean` and list both `used_providers`.
-
-For a candidate with only one valid answer, use that answer's score and
-probabilities unchanged, label `aggregation: single` and
-`confidence_kind: provider_reported`, and list the contributing `used_providers`.
-Set `score_disagreement` to `null`: disagreement cannot be measured from one answer.
-Preserve the unavailable, failed, or invalid provider's reason without fabricating
-its score. Reject the candidate only when neither answer is valid.
+Each ranked candidate uses its first valid answer unchanged. Keep the score,
+confidence, probabilities, model, and request metadata, label
+`aggregation: single` and `confidence_kind: provider_reported`, and list exactly
+one contributing `used_providers` entry. Set `score_disagreement` to `null`, since
+there is one accepted observation per candidate. Preserve unavailable, failed, or
+invalid provider reasons without fabricating scores. Reject the candidate only
+when no selected provider supplies a valid answer.
 
 The Studio client consumes a versioned result containing the requested `provider`
-mode, `used_providers`, rubric version, candidate identifiers, ranked results,
+mode, `aggregation: priority_failover`, priority `order`, `basis`, and `metrics`,
+`used_providers`, rubric version, candidate identifiers, ranked results,
 rejected results, and per-provider status/error and request metadata. The route's
 `status` distinguishes `complete`, `degraded`, and `unavailable`. `degraded` means
-valid recommendations are available with incomplete provider coverage: Studio
+valid recommendations remain available after provider unavailability or invalid
+results. A healthy preferred provider can return `complete` without calling
+fallback. For a degraded result, Studio
 continues preparation and shows which provider was used and why the other did not
 contribute. It must not treat successful fallback as an overall routing failure.
 
@@ -185,7 +204,8 @@ or superseded task brief cannot acquire a late bundle or launch a worker.
 Use separate caches for recommendation results and immutable skill content. A
 recommendation cache key includes the sanitized task hash, index generation,
 candidate metadata revisions, rubric/prompt versions, selected provider mode,
-provider models, and selection/trust policy version. A cached degraded result keeps
+provider models, priority profile/version, and selection/trust policy version. A
+cached degraded result keeps
 its original provider coverage and error status visible; it must not prevent a new
 request after previously unavailable provider configuration becomes usable. A
 content cache key includes
@@ -194,7 +214,8 @@ content. A changed provider, source revision, task, or policy invalidates the
 corresponding selection.
 
 Task attempt history records recommendation and preparation IDs, requested provider
-mode, route status, used providers, per-provider results and errors, per-candidate
+mode, priority order/basis/metrics, route status, used providers, per-provider
+results and errors, per-candidate
 aggregation, rejection/skip reasons, resolved versions, validation outcome,
 loaded instruction hashes, cache use, latency, and verification result. Store
 request IDs and usage only when supplied; unknown cost remains unknown. Keep keys
@@ -207,8 +228,8 @@ timeout. Rate-limit backoff stops at the overall deadline.
 
 | Failure | Result |
 |---|---|
-| In `both`, one provider has missing/invalid configuration or a request error | Use the other provider automatically. Preserve valid earlier answers and stop further calls to the failed provider. Show degraded status when ranking remains available; continue preparation. |
-| In `both`, a candidate has only one valid answer | Use the valid answer with single-provider provenance; disagreement is unavailable. Reject only when neither answer is valid. |
+| In `both`, the preferred provider has missing/invalid configuration or a request error | Use fallback only for unresolved IDs, without request retries. Preserve valid earlier answers and stop further calls to the failed provider. Show degraded status when ranking remains available; continue preparation. |
+| In `both`, the preferred provider returns a missing or malformed candidate answer | Request only unresolved IDs from fallback. Keep its first valid answer with single-provider provenance; disagreement is unavailable. Reject only when no valid answer remains. |
 | No valid ranking, missing index, malformed MCP result, or overall routing timeout | Report routing unavailable. Follow the selected continue/hold policy; preserve rejection/error provenance. Explicit single-provider modes do not switch services. |
 | A candidate cannot be retrieved, fails validation, or lacks a dependency | Exclude it with a reason; continue preparing the remaining candidates. |
 | Accepted skill exceeds remaining budgets | Keep existing selected skills and omit the recommendation; report the budget reason. |
@@ -239,9 +260,10 @@ on the multi-provider CLI.
   enum, bounded inputs, structured results, and cancellation/deadline contract.
 - Acceptance: stdio stdout contains only MCP messages; diagnostic output goes to
   stderr. Index refresh is a separate operator command.
-- Acceptance: fixtures prove all three modes, automatic fallback in `both`,
-  per-candidate single/equal-mean provenance, and rejection only without a valid
-  answer. Explicit single-provider modes stay strict.
+- Acceptance: fixtures prove all three modes, accuracy-first priority and cost
+  tie-breaking, automatic fallback only for unresolved IDs, per-candidate single
+  provenance, and rejection only without a valid answer. A healthy preferred
+  provider causes no additional provider call. Single-provider modes stay strict.
 - Acceptance: missing/invalid provider configuration, later-batch failure, and
   unavailable routing keep structured status/error metadata and candidate counts.
 
@@ -263,7 +285,7 @@ depends on Task 1.
   errors. Normal output is bounded below the worker bridge's text limit.
 
 Verification: a local pilot with OpenCode, Claude Code, and Codex; captured fixture
-output verifies provider provenance. Likely files: integration instructions and
+output verifies priority basis and provider provenance. Likely files: integration instructions and
 connector/bridge tests. Checkpoint: recommendation transport works independently
 of automatic preparation.
 
@@ -302,8 +324,9 @@ tests. Checkpoint: only policy-accepted immutable bundles can be published.
 
 - Acceptance: existing configuration migrates to routing off; project and task
   overrides resolve predictably without changing global skill usage settings.
-- Acceptance: English controls expose mode, provider/model selection, source
-  policy, limits, and continue/hold behavior; credentials remain device-local.
+- Acceptance: English controls expose mode, provider/model selection, priority
+  profile and evidence basis, source policy, limits, and continue/hold behavior;
+  credentials remain device-local.
 - Acceptance: enabling routing without a ready approved connector shows an
   actionable preparation status. In `both`, one usable provider is sufficient;
   the setup view reports skipped providers and permits configuration of the other.
@@ -330,7 +353,8 @@ an adjacent disabled task receives no router instructions.
 
 **Task 7 — Add provenance and bounded recovery.** Studio; depends on Task 6.
 
-- Acceptance: attempt records show requested mode, route status, used providers,
+- Acceptance: attempt records show requested mode, priority order/basis/metrics,
+  route status, used providers,
   per-candidate aggregation, recommendations, per-provider scores/confidence and
   errors, revisions, cache decisions, loaded hashes, and failure/skip reasons.
 - Acceptance: continue/hold policies, deadlines, and bounded retries behave as
@@ -346,8 +370,9 @@ preparation module, attempt history integration, and tests.
 **Task 8 — Validate the pilot and rollback.** Both repositories; depends on Task 7.
 
 - Acceptance: end-to-end fixtures cover off, Jev, Perplexity, both, recommend-only,
-  activate, single-provider fallback in both directions, invalid candidate answers,
-  later-batch failure, and both-provider unavailability with the intended outcome.
+  activate, measured quality/cost priority, a healthy preferred provider with no
+  fallback calls, fallback in either direction only for unresolved IDs, invalid
+  candidate answers, later failure, and both-provider unavailability.
 - Acceptance: switching the feature off restores the previous dispatch behavior
   immediately for future runs, with no router network calls or cached instructions.
 - Acceptance: publish installation, provider configuration, budget behavior, and

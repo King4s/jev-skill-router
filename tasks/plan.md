@@ -15,22 +15,30 @@ work. All new code, documentation, test names and commits are in English.
   and `PERPLEXITY_API_KEY`. Send keys only to their fixed HTTPS endpoint.
 - `--provider jev|perplexity|both` overrides `SKILL_ROUTER_PROVIDER`; default `jev`.
   Explicit per-provider model options override their environment defaults.
-- In `both`, attempt configured, usable providers concurrently, using a common
-  task state and rubric. Batch at 128 questions to respect the Perplexity limit.
-  At least one usable credential is sufficient. Record missing/invalid key or
-  model configuration and continue with the other provider.
-- In `both`, a candidate needs at least one valid answer. Average two valid
-  scores/distributions equally; otherwise retain the single valid answer. Label
-  candidate `aggregation` as `equal_mean` or `single`, and record `used_providers`.
-  Confidence is `minimum_provider_confidence` for two answers and
-  `provider_reported` for one. Disagreement is the absolute score difference for
-  two answers and unavailable (`null`) for one; neither policy proves calibration.
+- In `both`, use ordered failover: higher measured accuracy first, then lower
+  measured cost per candidate for exact accuracy ties. Use valid, model-matched
+  profile evidence; otherwise disclose a provisional price/default ordering basis.
+  `--priority-profile` overrides `SKILL_ROUTER_PRIORITY_PROFILE`; the shipped
+  `provider-priority.json` starts with Perplexity then Jev from external
+  DecisionBench evidence. The profile stores models, accuracy,
+  `cost_per_candidate_usd`, source, and sample count. It does not establish
+  skill-routing accuracy; compare representative quality and actual request cost.
+- Call the preferred configured provider first, using a common task state and
+  rubric. Call fallback only for unresolved candidate IDs after unavailability,
+  request failure, or invalid/missing answers. A healthy preferred provider means
+  no extra provider call. Batch at 128 questions and disable retries in `both`.
+  At least one usable credential is sufficient; record missing/invalid key/model.
+- A candidate uses the first valid answer unchanged, with `aggregation: single`
+  and one `used_providers` entry. Confidence is `provider_reported`, and
+  disagreement is unavailable (`null`). No score or confidence is averaged.
 - After a provider request fails, keep its valid earlier batch observations and
-  stop its further requests. The other provider continues over the full shortlist.
+  stop its further requests. The other provider receives only unresolved IDs.
   Reject a candidate only when neither provider has a valid answer; record reasons.
 - Explicit `jev` and `perplexity` modes remain strict. Record per-provider
   status/error and route `status: complete|degraded|unavailable`, retaining the
-  requested mode separately from `used_providers`. Degraded fallback is successful
+  requested mode separately from `used_providers`. Route `aggregation` is
+  `priority_failover` in `both`, with `priority.order`, `basis`, and `metrics`.
+  Degraded fallback is successful
   routing. No valid ranking produces a nonzero CLI exit; `--out` still writes the
   structured rejection/provenance result. Preserve candidate counts.
 - Keep `project`, `ranked`, `rejected`, `score`, `confidence`, and `probabilities`
@@ -45,15 +53,18 @@ work. All new code, documentation, test names and commits are in English.
    Acceptance: correct URLs/auth/models; selected key only; bounded retry/backoff;
    malformed answers and responses fail clearly; no credential-bearing redirects.
    Verification: `python -m unittest discover -s tests -v` and original selftest.
-2. **Selection and combined ranking** (depends on 1).
-   Add CLI options, batch scoring, provider metadata and explicit combined policy.
+2. **Selection and ordered failover** (depends on 1).
+   Add CLI/profile options, batch scoring, provider metadata and priority policy.
    Acceptance: all three modes work; each candidate is ranked or rejected; `both`
    survives missing configuration, request failure, and invalid individual answers
    whenever another valid answer exists, with explicit fallback provenance.
-   Acceptance: a later batch failure retains earlier answers, stops that provider,
-   and lets the other finish; neither usable provider yields structured failure.
-   Verification: offline route/CLI fixtures for all modes, one/both-provider
-   failures, candidate-level invalid answers, and more than 128 skills.
+   Acceptance: measured accuracy controls order, exact accuracy ties use measured
+   cost, and missing/mismatched evidence reports a provisional basis.
+   Acceptance: a healthy preferred provider causes no fallback calls; fallback
+   receives only unresolved IDs. A later failure retains earlier answers, stops
+   that provider, and lets the other finish; neither usable provider yields failure.
+   Verification: offline route/CLI fixtures for all modes, priority quality/cost
+   policies, one/both-provider failures, invalid answers, and more than 128 skills.
 3. **Documentation and Studio plan** (depends on the contracts above).
    Update usage, skill instructions and change notes; document Studio's optional
    disabled-by-default integration phases with source links and acceptance gates.
@@ -69,12 +80,16 @@ work. All new code, documentation, test names and commits are in English.
 ## Official sources
 
 - [Perplexity Decisions quickstart](https://docs.perplexity.ai/docs/decisions/quickstart)
+- [TypeSafe models and pricing](https://docs.typesafe.ai/models)
+- [DecisionBench published measurements](https://decisionbench.ai/data.json)
+- [DecisionBench evaluation protocol](https://decisionbench.ai/protocol.txt)
 - [Mefi Studio agent tools](https://github.com/nateecho32-stack/mefi-studio/blob/main/docs/agent-tools.md)
 - [Studio integration plan](../docs/studio-integration-plan.md)
 
 ## Limits
 
-Existing shortlist quality is unchanged. Dual-provider means are a transparent
-ranking policy, not measured calibration. Automated installation and activation
+Existing shortlist quality is unchanged. External choice accuracy is provisional
+ordering evidence, not measured skill-score accuracy or a universal quality claim.
+Token rates alone do not establish batched request cost. Automated installation and activation
 are not part of this router change. Offline tests do not prove live credentials,
 provider availability or end-to-end Studio compatibility.
