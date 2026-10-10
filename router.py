@@ -119,7 +119,7 @@ def read_sources(path: Path) -> list[tuple[str, str]]:
 
 def gh_api(path: str):
     r = subprocess.run(["gh", "api", "-H", "Accept: application/vnd.github+json", path],
-                       capture_output=True, text=True)
+                       capture_output=True, text=True, encoding="utf-8")
     if r.returncode != 0:
         return None
     try:

@@ -17,6 +17,9 @@
 
 ### Fixed
 
+- Decode GitHub CLI JSON as UTF-8 so non-ASCII skill paths do not crash index
+  building on Windows with a legacy system code page.
+
 - In `both` mode, automatically use the other provider when one is unavailable
   or errors. Call it only for unresolved candidates; a healthy preferred provider
   causes no additional provider call. Request retries are disabled in `both`.
