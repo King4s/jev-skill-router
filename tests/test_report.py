@@ -105,6 +105,57 @@ class ReportCompatibilityTests(unittest.TestCase):
             self.assertIn("Decision maker: both", html)
             self.assertIn("minimum provider confidence", html)
 
+    def deployment_report(self, root, encodings, mismatch=None):
+        corpus = {"identity": "encoding-snapshot", "sources": 1, "unique": 1,
+                  "coverage": {"discovered": 1, "parsed": 1, "missing_metadata": 0,
+                               "known_negative_fixture": 0, "parse_failed": 0, "fetch_failed": 0}}
+        route = {"ranked": [{"name": "café", "repo": "example/skills", "tier": "community",
+                             "score": 2.4, "confidence": 0.8}], "rejected": [],
+                 "meta": {"corpus": {"identity": corpus["identity"]}}}
+        deployment = {"stats": {"corpus": corpus, "rows": 1, "duplicates": 0},
+                      **dict.fromkeys(("verified_at", "binary_sha256", "database_sha256", "service",
+                                       "listener", "wire_checks", "second_host", "scope"), "offline fixture"),
+                      "second_host_status": 200}
+        evaluation = {"corpus": {"identity": corpus["identity"]}, "active_rule": "plain", "top": 40,
+                      "rules": {"plain": {"hit": 1, "want": 3}}}
+        if mismatch == "route":
+            route["meta"]["corpus"]["identity"] = "different-snapshot"
+        elif mismatch == "eval":
+            evaluation["corpus"]["identity"] = "different-snapshot"
+        for name, data, encoding in zip(("minecraft.json", "deployment.json", "eval40.json"),
+                                        (route, deployment, evaluation), encodings):
+            (root / name).write_text(json.dumps(data, ensure_ascii=False), encoding=encoding)
+        return subprocess.run([sys.executable, "-B", str(REPORT), "--dir", str(root)],
+                              capture_output=True, encoding="utf-8",
+                              env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+
+    def test_deployment_inputs_reuse_encoding_aware_json_reading(self):
+        for encodings in (("cp1252", "utf-8", "utf-8"),
+                          ("utf-8", "utf-8-sig", "utf-8"),
+                          ("utf-8", "utf-8", "utf-8-sig"),
+                          ("cp1252", "utf-8-sig", "utf-8-sig")):
+            with self.subTest(encodings=encodings), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                completed = self.deployment_report(root, encodings)
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                rendered = (root / "rapport.html").read_text(encoding="utf-8")
+                self.assertIn("café", rendered)
+                self.assertIn("Verified native deployment", rendered)
+                self.assertIn("Snapshot: encoding-snapshot", rendered)
+                self.assertIn("1/3 at top 40", rendered)
+                self.assertIn("1 paths = 1 parsed", rendered)
+
+    def test_mixed_encoding_deployment_still_rejects_route_and_eval_identity_mismatches(self):
+        for mismatch in ("route", "eval"):
+            with self.subTest(mismatch=mismatch), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                completed = self.deployment_report(root, ("cp1252", "utf-8-sig", "utf-8-sig"), mismatch)
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertIn("AssertionError", completed.stderr)
+                self.assertNotIn("UnicodeDecodeError", completed.stderr)
+                self.assertNotIn("JSONDecodeError", completed.stderr)
+                self.assertFalse((root / "rapport.html").exists())
+
     def test_legacy_windows_ranking_is_still_readable(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

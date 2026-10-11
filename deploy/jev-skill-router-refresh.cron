@@ -1,0 +1,5 @@
+# Daily offline source-list consumption. This never updates executable code.
+SHELL=/bin/bash
+PATH=/usr/bin:/bin
+MAILTO=""
+20 3 * * * root /bin/bash -o pipefail -c '{ /usr/bin/timeout --verbose --kill-after=30s 3h /opt/jev-skill-router/jev-skill-refresh; status=$?; echo "refresh_exit_status=$status"; exit "$status"; } 2>&1 | /usr/bin/logger -t jev-skill-router-refresh'

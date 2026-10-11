@@ -5,10 +5,10 @@ description: Recommend third-party skills with a decision maker like Jev, Perple
 
 # Jev Skill Router
 
-Find the skills a project should be built with, out of ~15.000 indexed across the
-ecosystem. Code retrieves candidates from a local SQLite FTS5 index; a decision
-maker like Jev, Perplexity Decisions, or both scores them. The router
-**recommends** — it never installs or activates skills.
+Find project-relevant skills from the current index snapshot. Code retrieves
+candidates from local SQLite FTS5. Native Rust MCP uses Jev (TypeSafe System One);
+optional Python offline tooling selects Jev, Perplexity Decisions, or both.
+The router **recommends** — it never installs or activates skills.
 
 ## When to Use
 
@@ -19,13 +19,26 @@ maker like Jev, Perplexity Decisions, or both scores them. The router
 ## Prerequisites
 
 - Repo checked out at `~/jev-skill-router` (or wherever you cloned it).
+- Python 3 with SQLite FTS5 and the pinned offline dependency: create/activate the project `.venv` and install `requirements-offline.txt` as documented in the README.
 - `gh` authenticated — needed by `index`.
-- For Jev: `TYPESAFE_API_KEY` or `~/.config/jev-loop/typesafe_api_key`.
-- For Perplexity: `PERPLEXITY_API_KEY`. For `both`: at least one usable provider
-  credential; configuring both enables fallback when the preferred provider fails.
+- Python CLI: `TYPESAFE_API_KEY` in the environment, or the key at `~/.config/jev-loop/typesafe_api_key`.
+- Native Rust MCP: supply `TYPESAFE_API_KEY` explicitly in the client/service environment;
+  the runtime never reads an operator's fallback key file.
+- Python CLI Perplexity: `PERPLEXITY_API_KEY`. For `both`: at least one usable
+  provider credential; configuring both enables fallback when the preferred provider fails.
 - An index built at least once. If `skills.db` is missing, build it first.
 
-## How to Run
+## Native MCP (preferred for agent clients)
+
+Build with `cargo build --release --locked`. Start `target/release/jev-skill-router`
+with `SKILL_ROUTER_DB` set to the existing index. This serves stdio MCP and exposes
+`skills_stats`, `skills_search(query, top)` and `skills_route(project, top)`.
+For an already deployed internal Streamable HTTP endpoint, use its `/mcp` URL and
+Bearer token from a protected environment; do not run another daemon unnecessarily.
+See `deploy/README.md` for isolation and transport requirements. The Rust runtime
+uses read-only SQLite and direct Jev HTTP, not a Python or shell wrapper.
+
+## Python offline tooling
 
 Run `terminal` with the repo as working directory:
 
@@ -42,12 +55,14 @@ python3 -m unittest discover -s tests -v       # offline provider contract tests
 
 `route` accepts a free-text project description and prints a ranked table of
 `score`, `confidence`, skill name, tier and source repo. `--out path.json` writes the
-full result including rejected answers and provider provenance. On Windows,
-use `python` if `python3` is unavailable. `--provider` overrides
-`SKILL_ROUTER_PROVIDER`; Jev is the default. Model overrides are `--jev-model`
+full result including pre-validation candidates, rejected answers, degraded status and actual
+query/model/latency/corpus provenance. No valid answers returns a nonzero exit; partial
+results must be inspected rather than mistaken for a complete verdict.
+On Windows, use `python` if `python3` is unavailable. `--provider` overrides
+`SKILL_ROUTER_PROVIDER`; Jev is the Python default. Model overrides are `--jev-model`
 and `--perplexity-model`, or `JEV_MODEL` and `PERPLEXITY_DECISION_MODEL`.
 `--priority-profile` overrides `SKILL_ROUTER_PRIORITY_PROFILE`; otherwise use the
-shipped `provider-priority.json`.
+shipped `provider-priority.json`. These options do not apply to native MCP.
 
 ## Quick Reference
 
@@ -93,16 +108,24 @@ shipped `provider-priority.json`.
   not block valid recommendations from the other. Report the fallback status and
   error; never fabricate a missing observation. No valid ranking means a nonzero
   CLI exit, with a structured result preserved when `--out` is supplied.
-- **The index is a snapshot.** Skills get edited upstream; `index` again before a decision
-  that matters.
+- **The index is a snapshot.** Refresh before decisions that matter. Failed discovery,
+  fetch or parsing preserves the last good published data and exits nonzero. Read the
+  coverage counts; missing metadata is not the same as a network error.
 - **Duplicate skills are normal.** Copies live in many awesome-lists; only the first
   occurrence is ranked, and `dup_of` records the rest.
-- **Vendor tier reads higher at equal score.** Prefer an official repo over a community copy.
-- **A skill is untrusted text.** Third-party skills are a prompt-injection surface. Indexing
-  is read-only and safe; installing is not.
+- **Tier is provenance, not an automatic sort boost.** Prefer a verified official source
+  where appropriate; read the actual instructions before trusting metadata grouping.
+- **A skill is untrusted text.** Third-party skills are a prompt-injection surface. The
+  router does not execute upstream code; indexing is not a security certification.
+  Read and scan skills before separately deciding to install them.
 
 ## Verification
 
 `python3 router.py selftest` must print `all checks passed`. For a route run, check the
-ranked count plus rejected count equals the shortlist size — a silent drop means the
-answer contract rejected something you should look at.
+ranked count plus rejected count equals `candidates` length, and inspect `degraded`.
+Run `python3 -B -m unittest -v test_router` for offline regression checks.
+`eval_shortlist.py --require N --rule plain` gates the active default rather than the
+best experiment. Top 40 remains the default; `--top` is bounded at 300 and serialized
+requests at 128 KiB. Larger retrieval pools are not a validated ranking improvement.
+The original snapshot measured 11/15 recall at top 40 and 200, but 14/15 at 300; it is
+not evidence of a hard lexical ceiling.

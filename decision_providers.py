@@ -1,6 +1,8 @@
 """Standard-library clients for the router's selectable decision makers."""
 from __future__ import annotations
 
+from datetime import timezone
+from email.utils import parsedate_to_datetime
 import json
 import http.client
 import math
@@ -77,7 +79,13 @@ def _retry_delay(headers, attempt: int) -> float:
             if math.isfinite(seconds) and seconds >= 0:
                 return seconds
         except (TypeError, ValueError):
-            pass
+            try:
+                date = parsedate_to_datetime(value)
+                if date.tzinfo is None:
+                    date = date.replace(tzinfo=timezone.utc)
+                return max(0.0, date.timestamp() - time.time())
+            except (TypeError, ValueError, OverflowError):
+                pass
     return min(0.5 * 2 ** attempt, 4.0)
 
 

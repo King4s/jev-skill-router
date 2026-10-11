@@ -851,6 +851,56 @@ class ProviderHTTPTests(unittest.TestCase):
         self.assertEqual(call.call_count, 1)
         sleep.assert_not_called()
 
+    def test_retry_after_dates_and_numeric_bounds_use_the_actual_transport(self):
+        cases = (
+            ("Thu, 01 Jan 2026 00:00:02 GMT", 2),
+            ("Thu, 01 Jan 2026 00:00:30 GMT", 30),
+            ("Thu, 01 Jan 2026 02:00:02 +0200", 2),
+            ("Thu, 01 Jan 2026 00:00:02 -0000", 2),
+            ("Wed, 31 Dec 2025 23:59:55 GMT", 0),
+            ("not-a-date private-fragment", 0.5),
+            ("Thu, 99 Jan 2026 00:00:02 GMT", 0.5),
+            ("0", 0), ("2", 2), ("30", 30),
+            ("-1", 0.5), ("nan", 0.5), ("inf", 0.5),
+        )
+        for provider in ("jev", "perplexity"):
+            for status in (429, 503):
+                for header, delay in cases:
+                    with self.subTest(provider=provider, status=status, header=header):
+                        error = urllib.error.HTTPError(self.providers.ENDPOINTS[provider], status,
+                            "Temporary", {"Retry-After": header}, io.BytesIO(b"private-fragment"))
+                        payload = response_for(self.questions)
+                        with patch.object(self.providers, "_open", side_effect=[error,
+                                          self.response(payload)]) as call, \
+                             patch("time.time", return_value=1767225600), patch("time.sleep") as sleep:
+                            result = self.providers.decision_call(provider, self.state,
+                                                                  self.questions, retries=1)
+                        self.assertEqual(result, payload)
+                        self.assertEqual(call.call_count, 2)
+                        self.assertTrue(error.fp.closed)
+                        sleep.assert_called_once_with(delay)
+
+    def test_retry_after_future_dates_above_limit_reject_without_retry_or_leaking(self):
+        request_id = "a80f8d70-9c20-4e8e-9cf8-a07e7b009db0"
+        for provider in ("jev", "perplexity"):
+            for status in (429, 503):
+                for header in ("Thu, 01 Jan 2026 00:00:31 GMT",
+                               "Thu, 01 Jan 2026 00:02:00 GMT", "120"):
+                    with self.subTest(provider=provider, status=status, header=header):
+                        error = urllib.error.HTTPError(self.providers.ENDPOINTS[provider], status,
+                            "private-fragment", {"Retry-After": header, "x-request-id": request_id},
+                            io.BytesIO(b"jev-secret pplx-secret Private project specification"))
+                        with patch.object(self.providers, "_open", side_effect=[error,
+                                          self.response(response_for(self.questions))]) as call, \
+                             patch("time.time", return_value=1767225600), patch("time.sleep") as sleep:
+                            with self.assertRaises(self.providers.ProviderError) as caught:
+                                self.providers.decision_call(provider, self.state, self.questions, retries=1)
+                        self.assertEqual(str(caught.exception),
+                            f"{provider} request failed (HTTP {status}; request ID {request_id}). Retry later.")
+                        self.assertEqual(call.call_count, 1)
+                        self.assertTrue(error.fp.closed)
+                        sleep.assert_not_called()
+
     def test_only_valid_uuid_request_ids_are_captured(self):
         request_id = "a80f8d70-9c20-4e8e-9cf8-a07e7b009db0"
         for header in (request_id, "pplx-secret Private project specification"):
@@ -1001,6 +1051,42 @@ class RouteCLITests(unittest.TestCase):
         self.assertEqual(result["ranked"], [])
         self.assertEqual([row["id"] for row in result["rejected"]], [1])
         self.assertTrue(result["rejected"][0]["error"])
+
+    def test_invalid_or_missing_priority_profile_preserves_failure_artifact_without_requests(self):
+        priority = importlib.import_module("provider_priority")
+        invalid = Path(self.directory.name) / "invalid-priority.json"
+        invalid.write_text('{"schema_version": 2}', encoding="utf-8")
+        missing = Path(self.directory.name) / "missing-priority.json"
+        for profile, error in ((invalid, "Invalid priority profile schema."),
+                               (missing, "Cannot read a valid decision-provider priority profile.")):
+            with self.subTest(profile=profile.name):
+                self.output.unlink(missing_ok=True)
+                argv = ["router.py", "route", "React dashboard", "--db", str(self.db),
+                        "--provider", "both", "--priority-profile", str(profile), "--out", str(self.output)]
+                console = io.StringIO()
+                with patch.dict(os.environ, {"TYPESAFE_API_KEY": "jev-test-key",
+                                             "PERPLEXITY_API_KEY": "pplx-test-key"}, clear=True):
+                    with patch.object(sys, "argv", argv), \
+                         patch.object(router, "provider_order", wraps=priority.provider_order), \
+                         patch.object(router, "decision_call") as call, \
+                         contextlib.redirect_stdout(console), contextlib.redirect_stderr(io.StringIO()):
+                        self.assertEqual(router.main(), 1)
+                call.assert_not_called()
+                result = json.loads(self.output.read_text(encoding="utf-8"))
+                self.assertEqual(result["status"], "unavailable")
+                self.assertEqual(result["provider"], "both")
+                self.assertIsNone(result["priority"])
+                self.assertEqual(result["providers"], {})
+                self.assertEqual(result["used_providers"], [])
+                self.assertEqual(result["ranked"], [])
+                self.assertEqual([row["id"] for row in result["candidates"]], [1])
+                self.assertEqual([row["id"] for row in result["rejected"]], [1])
+                self.assertEqual(result["error"], error)
+                self.assertEqual(result["rejected"][0]["error"], error)
+                self.assertTrue(result["meta"]["corpus"]["identity"])
+                self.assertIn("priority unavailable", console.getvalue())
+                self.assertIn(error, console.getvalue())
+                self.assertNotIn(" -> ", console.getvalue())
 
     def test_provider_option_and_model_options_are_forwarded(self):
         calls, result = self.route(["--provider", "both", "--jev-model", "jev-custom",

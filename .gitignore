@@ -1,8 +1,15 @@
-# The index is derived data; rebuild it with `router.py index`.
+# Derived indexes and local measurement artifacts are rebuilt, not committed.
 skills.db
 skills.db-journal
 *.json.tmp
 __pycache__/
+.venv/
+measurements/
+target/
 .env
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
 .env.*
 !.env.example

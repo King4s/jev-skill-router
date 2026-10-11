@@ -66,20 +66,30 @@ def main():
     p.add_argument("--db", default=str(router.DB))
     p.add_argument("--top", type=int, default=40)
     p.add_argument("--show", action="store_true")
+    p.add_argument("--rule", choices=router.RULES, default="plain", help="active rule gated by --require")
+    p.add_argument("--out", help="write measured comparison JSON")
     p.add_argument("--require", type=int, default=None,
-                   help="exit non-zero unless the winning rule reaches this many hits — "
-                        "makes the harness usable as a jev-loop check")
+                   help="exit non-zero unless the active rule reaches this many hits")
     args = p.parse_args()
-    import sqlite3
-    db = sqlite3.connect(args.db)
+    import json
+    db = router.open_index(args.db)
+    if args.require is not None and not 0 <= args.require <= sum(len(w) for _, _, w in CASES):
+        p.error("--require must be within the facit size")
     results = {}
-    for rule in ("plain", "bm25", "pool", "hybrid", "idf"):
+    for rule in router.RULES:
         print(f"\nrule: {rule}")
         results[rule] = run(db, rule, args.top, args.show)
     best = max(results, key=lambda k: results[k])
-    print(f"\nwinner: {best} ({results[best]} hits) — keep it as the default in shortlist()")
-    if args.require is not None and results[best] < args.require:
-        print(f"FAIL: need {args.require} hits, best rule reached {results[best]}")
+    print(f"\ncomparison winner: {best} ({results[best]} hits); active rule: {args.rule} ({results[args.rule]} hits)")
+    if args.out:
+        total = sum(len(want) for _, _, want in CASES)
+        payload = {"top": args.top, "active_rule": args.rule, "corpus": router.corpus_meta(db),
+                   "rules": {rule: {"hit": n, "want": total} for rule, n in results.items()},
+                   "cases": [{"name": name, "project": project, "want": want} for name, project, want in CASES]}
+        Path(args.out).write_text(json.dumps(payload, indent=2, ensure_ascii=False))
+    db.close()
+    if args.require is not None and results[args.rule] < args.require:
+        print(f"FAIL: need {args.require} hits, active {args.rule} reached {results[args.rule]}")
         return 1
     return 0
 

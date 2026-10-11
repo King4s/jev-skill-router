@@ -1,0 +1,32 @@
+[Unit]
+Description=Jev Skill Router - read-only MCP recommendations
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=jev-skill-router
+Group=jev-skill-router
+EnvironmentFile=/etc/jev-skill-router.env
+ExecStart=/opt/jev-skill-router/jev-skill-router --http
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=true
+CapabilityBoundingSet=
+MemoryMax=512M
+TasksMax=128
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

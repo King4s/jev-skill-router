@@ -1,36 +1,28 @@
 {
-  "goal": "Raise the skill-router's shortlist recall on the four-project eval set from 11/15 to 13/15 by changing how candidates are retrieved, without weakening the Jev answer contract, and document the measured ceiling that keeps it away from 15/15.",
+  "goal": "Deliver a verified native Rust MCP skill router, complete 98-source index refresh, isolated internal deployment and current English GitHub documentation/report.",
   "acceptance": [
-    "`python3 scripts/eval_shortlist.py --require 13` exits 0: at least 13 of the 15 facit skills survive the top-40 shortlist across the four eval projects",
-    "`python3 router.py selftest` still passes — the answer contract validator and the FTS prefilter are not weakened to reach the target",
-    "The winning retrieval rule is measured against the current one on the same four projects, and the numbers are printed by the harness rather than asserted in prose",
-    "What still cannot be found is written down with the measurement that shows it (the keyword ceiling), not silently left out",
-    "Running `python3 router.py route \"<project>\"` end to end still works and still rejects malformed Jev answers"
+    "All 98 authorized GitHub sources are pinned and completely discovered; every SKILL.md path is represented by an indexed source row or an exact recorded omission. Zero discovery, fetch or parse failures are required before publication; failed refresh preserves the previous corpus.",
+    "A native official-SDK Rust MCP runtime exposes skills_stats, skills_search and skills_route over stdio and authenticated internal Streamable HTTP, uses read-only SQLite with snapshot-consistent provenance, and never launches Python, a shell or skill code.",
+    "Request, response, text and concurrency limits are exercised against the actual compiled binary; Jev validation preserves full candidate accounting, partial/degraded and no-valid-answer distinctions, bounded retries and redacted errors.",
+    "Independent source-based specification and security reviews approve the exact source. Python regression/selftest and actual Rust format/test/Clippy/release plus stdio/HTTP smoke checks pass. Synthetic fixtures are labeled offline, never live provider evidence.",
+    "The tested binary and a verified consistent DB snapshot run in a dedicated non-login Odin systemd service with root-owned code, read-only data, protected secrets and a Tailnet-only bind. Real authenticated MCP-to-Jev ranking and cross-host access pass, and artifact/corpus identities match.",
+    "Current English documentation and a regenerated evidence-based report distinguish retrieval, ranking, validation, degraded results and provenance. Reviewed changes are published through a PR; remote contents and any authorized default-branch update are read back. No history rewriting, secrets or unrelated project changes."
   ],
   "workdir": ".",
   "checks": [
-    "python3 router.py selftest",
-    "python3 scripts/eval_shortlist.py --require 13"
+    ".venv/bin/python3 -B -c \"import ast,pathlib; [ast.parse(p.read_text()) for p in pathlib.Path('.').rglob('*.py') if not any(x in p.parts for x in ('.venv','.git','target'))]\"",
+    ".venv/bin/python3 -B router.py selftest",
+    ".venv/bin/python3 -B -m unittest -v test_router"
   ],
-
   "jev_model": "jev-latest",
   "jev_done_threshold": 0.8,
-  "max_turns": 12,
-  "max_consecutive_failures": 3,
+  "max_turns": 20,
+  "max_consecutive_failures": 4,
   "check_timeout": 300,
-
   "roles": {
-    "build": {
-      "when": "The retrieval rule is unchanged and the shortlist recall check is still failing",
-      "brief": "Change how candidates are retrieved in router.py. Keep the change inside shortlist() and its callers. Do not touch the answer-contract validator or the Jev question shape. Measure every variant with scripts/eval_shortlist.py; do not claim an improvement that the harness does not print."
-    },
-    "fix": {
-      "when": "A check fails with a concrete error message",
-      "brief": "Read the failing check output and fix the root cause with the smallest correct change. Do not weaken a check to make it pass."
-    },
-    "docs": {
-      "when": "The recall target is reached but the ceiling that remains is not written down",
-      "brief": "Update README.md with the measured before/after and the skills that still cannot be found, naming the measurement that shows it. Keep it in English."
-    }
+    "test": {"when": "A concrete trust-boundary regression is missing", "brief": "Add the smallest runnable failing check for the known defect. Preserve assertions and scope."},
+    "fix": {"when": "A proven defect blocks delivery", "brief": "Fix the demonstrated root cause in the shared path, retaining atomic publication and strict validation."},
+    "build": {"when": "Native Rust implementation is incomplete", "brief": "Complete only the official-SDK native runtime and prove real compilation and integration against the actual index schema."},
+    "docs": {"when": "Reviewed implementation is checked but deployment/report/publication remains", "brief": "Deploy only the authorized internal new service, verify actual artifact/endpoint/provider/corpus behavior, regenerate English evidence and publish only reviewed work. Never substitute a completion claim for a blocker."}
   }
 }
