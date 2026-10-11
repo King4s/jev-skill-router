@@ -11,7 +11,7 @@
 ![Protocol: MCP](https://img.shields.io/badge/protocol-MCP-blue)
 ![Safety: read only](https://img.shields.io/badge/safety-read--only-2ea44f)
 
-[Quick start](#quick-start) · [MCP tools](#mcp-tools) · [Safety](#safety-and-limits) · [Verification](#verification) · [Sources](Skills-list.md)
+[Quick start](#quick-start) · [MCP tools](#mcp-tools) · [Safety](#safety-and-limits) · [Verification](#verification) · [Sources](https://github.com/King4s/jev-skill-router/blob/main/Skills-list.md)
 
 </div>
 
@@ -29,9 +29,12 @@ shell subprocess, or skill execution in the runtime.
 
 Requirements: Rust/Cargo, Python 3 with SQLite FTS5, authenticated [GitHub CLI](https://cli.github.com/),
 and a [TypeSafe API key](https://console.typesafe.ai/keys) for ranking. Retrieval needs no model key.
+The native implementation is on the reviewed `fix/review-921faed` branch
+([PR #1](https://github.com/King4s/jev-skill-router/pull/1)), not merged into `main`.
+The refresh utility consumes `main`'s source list without importing its executable code.
 
 ```sh
-git clone https://github.com/King4s/jev-skill-router.git
+git clone --branch fix/review-921faed --single-branch https://github.com/King4s/jev-skill-router.git
 cd jev-skill-router
 python3 -m venv .venv
 . .venv/bin/activate
@@ -82,7 +85,7 @@ inspect confidence as well as score before making a separate installation decisi
 
 ```mermaid
 flowchart LR
-    A[98 authorized GitHub sources] --> B[Pin branch revision and complete tree]
+    A[Authorized GitHub sources] --> B[Pin branch revision and complete tree]
     B --> C[Bounded frontmatter + blob-SHA cache]
     C --> D[Atomic SQLite snapshot]
     D --> E[Read-only FTS5 shortlist]
@@ -90,8 +93,9 @@ flowchart LR
     F --> G[Validated ranked recommendations]
 ```
 
-- [`Skills-list.md`](Skills-list.md) is the single source list. Numbered sections
-  map to provenance tiers; the flagged/excluded section is not ingested. Site-only
+- The [current GitHub-main `Skills-list.md`](https://github.com/King4s/jev-skill-router/blob/main/Skills-list.md)
+  is the refresh authority. This branch's list preserves the original 98-source baseline.
+  Numbered sections map to provenance tiers; the flagged/excluded section is not ingested. Site-only
   registries and GitLab/Hugging Face entries are documented, not implied GitHub coverage.
 - Each GitHub source uses metadata → encoded branch ref → pinned recursive tree.
   Truncated trees fail explicitly. Raw requests use the pinned revision and escaped paths.
@@ -148,6 +152,13 @@ listed repository fails the entire refresh; it is never silently dropped. See th
 [deployment guide](deploy/README.md#automatic-source-list-consumption) for installation,
 manual execution, failure diagnostics and rollback.
 
+**Verified live on 2026-10-11:** the installed job published the current **108-source**
+authority after the owner-approved single-source exclusion in [PR #4](https://github.com/King4s/jev-skill-router/pull/4).
+The MCP endpoint served the new snapshot without a restart: **15,682 canonical records**,
+**26,098 source rows**, **26,596 fully accounted paths**, zero fetch/parse failures,
+and 40 validated candidates from the real Jev provider. Daily consumption is enabled;
+this successful manual run does not claim the next scheduled tick has already occurred.
+
 ## Safety and limits
 
 | Boundary | Enforced behavior |
@@ -196,7 +207,8 @@ The verified **2026-10-05 parser-8 snapshot** contains **10,710 canonical metada
 from **98 pinned sources**. All **18,629 discovered paths** are accounted for:
 18,133 parsed records (including 7,423 duplicate source rows), 495 missing-metadata
 paths and one exact negative fixture; **zero fetch or parse failures**.
-Current plain recall is **9/15 at top 40 and 14/15 at top 300**.
+That snapshot measured plain recall **9/15 at top 40 and 14/15 at top 300**;
+these are historical 98-source results, not measurements of the new 108-source snapshot.
 See the [delivery evidence and limitations](docs/delivery-2026-10-05.md).
 
 The original snapshot measured plain recall **11/15 at top 40 and 200, 14/15 at 300**.

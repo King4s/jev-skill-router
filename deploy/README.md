@@ -135,11 +135,30 @@ isolated preflight and the **installed batch utility using the exact cron comman
 failed at `wanghuan9/skilldock` in the current 109-source list. The journal recorded
 `discovery_failed` with that repo and `refresh_exit_status=1`; the live DB SHA-256
 remained `1e93dda087ac38ac946e95916f61d129419fcf73cebb2eedb30f67d6ecd8195b`.
-The unchanged native process passed authenticated MCP smoke and real Jev ranking
-(40 accepted candidates, model `jev-1.13.0`). Daily cron consumption is installed;
-**a fresh live publication remains blocked**, not complete. No source was excluded,
-no other project's code changed, and no `main` merge was performed. A manually
-exercised cron command does not prove the next scheduled tick has already run.
+The source-authority blocker was subsequently resolved with explicit owner approval
+in the one-file [PR #4](https://github.com/King4s/jev-skill-router/pull/4): only
+`wanghuan9/skilldock` moved to documented `Flagged / excluded`, retaining its metadata.
+The installed exact-cron-command run then **published the current 108-source snapshot**
+on 2026-10-11 at 20:56:43 host-local time, with `refresh_exit_status=0`.
+It consumed pinned authority commit `08c34ec43e26fceb9d922351b86d6b14a4ab65fb`.
+
+All **26,596 discovered paths** are accounted for: **17,201 cached + 8,897 newly parsed +
+497 missing-metadata + one exact negative fixture**, with zero fetch/parse failures.
+The live DB has **26,098 source rows = 15,682 canonical records + 10,416 duplicates**.
+Its snapshot identity is `8740e49f67c1a90b0e21775af75e8988b885db867520282511b88ffaa2b219b6`
+and DB SHA-256 is `b37d246bd8fa81b7340c3c2cf0ae2168ae211dd0074bd88bf2ccf036f70ba22a`.
+Readback confirmed exact 108-repo/tier membership, the authority commit, SQLite
+integrity and the original root:jev-skill-router 0640 permissions. The consistent
+previous snapshot retains the original 98-source identity and also passes integrity;
+its physical file hash differs from the original because it was made with `VACUUM INTO`.
+
+Authenticated deployed MCP wire/security smoke and real Jev ranking then passed
+against the **new** identity (40 accepted candidates, `jev-1.13.0`). PID 1773473 and
+restart count zero remained unchanged: actual next-request uptake was verified,
+not inferred from file replacement. No other project's code changed. Only the source
+correction PR #4 was merged; native implementation PR #1 remains unmerged.
+These are successful **manual exact-cron-command** receipts, not proof that the next
+scheduled 03:20 tick has already occurred.
 
 For manual execution, use the same root batch binary and timeout/logger command
 as the supplied cron entry. For a snapshot-only rollback, acquire the same refresh
