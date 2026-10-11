@@ -147,7 +147,6 @@ A curated overview of AI-agent skill projects: SKILL.md-based Agent Skills (Clau
 | [jiweiyeah/Skills-Manager](https://github.com/jiweiyeah/Skills-Manager) | 1,009 | 2026-09-10 | Desktop app: write once, sync to 32 tools |
 | [huggingface/upskill](https://github.com/huggingface/upskill) | 758 | 2026-09-23 | Generates and evaluates skills |
 | [EverMind-AI/SkillCorpus](https://github.com/EverMind-AI/SkillCorpus) | 678 | 2026-10-01 | Turns SKILL.md files into a searchable corpus |
-| [wanghuan9/skilldock](https://github.com/wanghuan9/skilldock) | 607 | 2026-10-03 | Desktop skill manager |
 | [VikashLoomba/copilot-mcp](https://github.com/VikashLoomba/copilot-mcp) | 504 | 2026-06-15 | VS Code extension to find and install skills for Copilot |
 | [K-Dense-AI/claude-skills-mcp](https://github.com/K-Dense-AI/claude-skills-mcp) | 407 | 2026-07-20 | MCP server for skill search |
 | [VintLin/skill-flow](https://github.com/VintLin/skill-flow) | 261 | 2026-10-03 | Install and share skills across agents |
@@ -163,6 +162,8 @@ A curated overview of AI-agent skill projects: SKILL.md-based Agent Skills (Clau
 | [open-index/open-skills](https://huggingface.co/datasets/open-index/open-skills) | 12 | 2026-04-10 | Archive of skills.sh |
 
 ## Flagged / excluded
+
+- [wanghuan9/skilldock](https://github.com/wanghuan9/skilldock) (Desktop skill manager; last recorded 607★, pushed 2026-10-03): GitHub API and public repository URL returned HTTP 404 on 2026-10-11. Moved here with owner approval; retained for source accounting, excluded from indexing until available again.
 
 - skills.sh leaderboard entries with install counts far out of line with GitHub activity (e.g. `prime-skills/runcomfy-agent-skills`, `flowkit-labs/skills`, `lllllllama/RigorPilot-Skills`).
 - Repos copying the `obra/superpowers` name (`101-skills/superpowers`, `qu-skills/superpowers`).
