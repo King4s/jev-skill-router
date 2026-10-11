@@ -25,6 +25,7 @@ jobs:
       - name: Python regression and self-check
         run: |
           python3 -B -m unittest -v test_router
+          python3 -B -m unittest discover -s tests -v
           python3 -B router.py selftest
       - name: Rust format, tests, lint and release
         run: |

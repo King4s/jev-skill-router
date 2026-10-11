@@ -15,6 +15,7 @@ import unittest
 from unittest.mock import patch
 from urllib.error import HTTPError
 
+import decision_providers
 import router
 
 
@@ -28,6 +29,9 @@ def load_script(name):
 
 GOOD = {'type': 'score', 'score': 2.4, 'confidence': 0.7,
         'probabilities': {'0': 0.0, '1': 0.1, '2': 0.4, '3': 0.5}}
+QUESTIONS = {'skill_000': {'type': 'score',
+                           'instructions': {'question': 'How useful is this skill?'},
+                           'criteria': router.LEVELS}}
 
 
 class ReviewChecks(unittest.TestCase):
@@ -45,7 +49,7 @@ class ReviewChecks(unittest.TestCase):
                                                'meta': {'corpus': {'identity': 'synthetic'}}}),
                  'deployment.json': json.dumps(deployed)}
         with patch.object(report.Path, 'exists', lambda p: p.name in files), \
-             patch.object(report.Path, 'read_text', lambda p: files[p.name]), \
+             patch.object(report.Path, 'read_text', lambda p, encoding=None: files[p.name]), \
              patch.object(report.Path, 'write_text') as output, \
              patch.object(sys, 'argv', ['rapport.py', '--dir', 'synthetic']), \
              contextlib.redirect_stdout(io.StringIO()):
@@ -368,10 +372,10 @@ class ReviewChecks(unittest.TestCase):
 
     def test_http_permanent_failure_attempted_once(self):
         for code in (401, 422):
-            with self.subTest(code=code), patch.object(router, 'jev_key', return_value='offline-key'), \
-                 patch.object(router.urllib.request, 'urlopen', side_effect=HTTPError(router.JEV_API, code, 'offline', Message(), io.BytesIO(b'{}'))) as call:
+            with self.subTest(code=code), patch.object(decision_providers, 'provider_key', return_value='offline-key'), \
+                 patch.object(decision_providers, '_open', side_effect=HTTPError(router.JEV_API, code, 'offline', Message(), io.BytesIO(b'{}'))) as call:
                 with self.assertRaises(RuntimeError):
-                    router.jev_call({}, {}, retries=3)
+                    router.jev_call({}, QUESTIONS, retries=3)
                 self.assertEqual(call.call_count, 1)
 
     def test_http_overload_retries_with_backoff(self):
@@ -379,10 +383,10 @@ class ReviewChecks(unittest.TestCase):
             response = contextlib.nullcontext(io.BytesIO(b'{"answers":{}}'))
             headers = Message()
             headers['Retry-After'] = '1'
-            with self.subTest(code=code), patch.object(router, 'jev_key', return_value='offline-key'), \
-                 patch.object(router.urllib.request, 'urlopen', side_effect=[HTTPError(router.JEV_API, code, 'offline', headers, io.BytesIO(b'{}')), response]) as call, \
+            with self.subTest(code=code), patch.object(decision_providers, 'provider_key', return_value='offline-key'), \
+                 patch.object(decision_providers, '_open', side_effect=[HTTPError(router.JEV_API, code, 'offline', headers, io.BytesIO(b'{}')), response]) as call, \
                  patch('time.sleep') as sleep:
-                self.assertEqual(router.jev_call({}, {}), {'answers': {}})
+                self.assertEqual(router.jev_call({}, QUESTIONS), {'answers': {}})
                 self.assertEqual(call.call_count, 2)
                 sleep.assert_called_once()
                 self.assertGreaterEqual(sleep.call_args.args[0], 1)

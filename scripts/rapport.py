@@ -37,6 +37,15 @@ def bar(score: float, conf: float) -> str:
             f'opacity:{0.35 + 0.65 * conf:.2f}"></span></span>')
 
 
+def read_json(path: Path):
+    """New routing files use UTF-8; older Windows output used CP1252."""
+    try:
+        text = path.read_text(encoding="utf-8-sig")
+    except UnicodeDecodeError:
+        text = path.read_text(encoding="cp1252")
+    return json.loads(text)
+
+
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--dir", default=".")
@@ -51,7 +60,7 @@ def main() -> int:
         f = d / f"{name}.json"
         if not f.exists():
             continue
-        data = json.loads(f.read_text())
+        data = read_json(f)
         ranked, rejected = data.get("ranked", []), data.get("rejected", [])
         got = {r["name"] for r in ranked}
         rank_hits = [w for w in want if w in got]
@@ -66,7 +75,7 @@ def main() -> int:
         corpus = meta.get("corpus", {})
         latency = meta.get("latency_s", "unknown")
         provenance = html.escape(f"top {top} · rule {meta.get('rule', 'unknown')} · "
-                                 f"model {meta.get('model') or 'unknown'} · Jev latency {latency} s · "
+                                 f"model {meta.get('model') or 'unknown'} · ranking latency {latency} s · "
                                  f"corpus {corpus.get('unique', 'unknown')} skills / "
                                  f"{corpus.get('sources', 'unknown')} sources · "
                                  f"snapshot {corpus.get('identity', 'unknown')}")
@@ -75,25 +84,42 @@ def main() -> int:
         for i, r in enumerate(ranked[:8], 1):
             hit = "hit" if r["name"] in want else ""
             warn = " low" if r["confidence"] < 0.35 else ""
+            used = r.get("used_providers", [])
+            source = f'<span class="repo">Using: {html.escape(", ".join(used))}</span>' if used else ""
             rows.append(
                 f'<tr class="{hit}"><td class="n">{i}</td>'
                 f'<td class="nm">{html.escape(r["name"])}'
                 f'<span class="tier" style="color:{TIER_COLOR.get(r["tier"], "")}">'
-                f'{html.escape(r["tier"])}</span><span class="repo">{html.escape(r["repo"])}</span></td>'
+                f'{html.escape(r["tier"])}</span><span class="repo">{html.escape(r["repo"])}</span>{source}</td>'
                 f'<td class="sc">{r["score"]:.2f}</td><td>{bar(r["score"], r["confidence"])}</td>'
                 f'<td class="cf{warn}">{r["confidence"]:.2f}</td></tr>')
         miss = [w for w in want if w not in {c["name"] for c in candidates}] if isinstance(candidates, list) else []
+        requested = html.escape(str(data.get("provider", "jev")))
+        provider = html.escape(", ".join(data["used_providers"]) or "none") if "used_providers" in data else requested
+        confidence_note = (" · two valid answers: minimum provider confidence, not consensus; "
+                           "one valid answer: provider-reported confidence") if data.get("provider") == "both" else ""
+        if data.get("aggregation") == "priority_failover":
+            confidence_note = " · preferred provider first; confidence is provider-reported confidence"
+        routing_note = ""
+        if "used_providers" in data:
+            used = html.escape(", ".join(data["used_providers"]) or "none")
+            status = html.escape(str(data.get("status", "unknown")))
+            fallback = ""
+            if data.get("status") == "degraded":
+                fallback = " · fallback used" if any(row.get("is_fallback", row.get("aggregation") == "single") for row in ranked) else " · incomplete provider coverage"
+            routing_note = f" · Requested mode: {requested} · Routing status: {status} · Providers used: {used}{fallback}"
         cards.append(f"""<section class="card">
 <h3>{html.escape(label)}</h3>
 <p class="sub">{provenance}</p>
+<p class="sub">Decision maker: {provider}{routing_note}{confidence_note}</p>
 <p class="verd">Retrieval recall: <b>{recall}</b>. Validated ranking coverage: <b>{len(rank_hits)}/{len(want)}</b>.
 {'<span class="miss">Missing from shortlist: ' + html.escape(', '.join(miss)) + '</span>' if miss else ''}
-{'· ' + str(len(rejected)) + ' answers dropped on contract breach' if rejected else ''}</p>
+{'· ' + str(len(rejected)) + ' candidates have no valid provider score' if rejected else ''}</p>
 <table>{''.join(rows)}</table></section>""")
 
     if not cards:
         raise ValueError("No known project artifacts found")
-    rules = json.loads((d / "regler.json").read_text()) if (d / "regler.json").exists() else {}
+    rules = read_json(d / "regler.json") if (d / "regler.json").exists() else {}
     rules = rules.get("rules", rules)
     rule_rows = "".join(
         f'<tr><td>{html.escape(k)}</td><td class="sc">{v["hit"]}/{v["want"]}</td>'
@@ -102,12 +128,12 @@ def main() -> int:
 
     delivery = ""
     if (d / "deployment.json").exists():
-        deployed = json.loads((d / "deployment.json").read_text())
+        deployed = read_json(d / "deployment.json")
         stats = deployed["stats"]
         corpus, coverage = stats["corpus"], stats["corpus"]["coverage"]
         for name in FACIT:
             if (d / f"{name}.json").exists():
-                route = json.loads((d / f"{name}.json").read_text())
+                route = read_json(d / f"{name}.json")
                 assert route.get("meta", {}).get("corpus", {}).get("identity") == corpus["identity"]
         assert coverage["discovered"] == sum(coverage[k] for k in
             ("parsed", "missing_metadata", "known_negative_fixture", "parse_failed", "fetch_failed"))
@@ -116,7 +142,7 @@ def main() -> int:
         for n in (40, 300):
             f = d / f"eval{n}.json"
             if f.exists():
-                measured = json.loads(f.read_text())
+                measured = read_json(f)
                 assert measured["corpus"]["identity"] == corpus["identity"]
                 v = measured["rules"][measured["active_rule"]]
                 evaluations.append(f"{v['hit']}/{v['want']} at top {measured['top']}")
@@ -207,7 +233,7 @@ from grocery classification or vendor demos do not establish routing accuracy.</
 fetch and parse counts; failed enumeration is not evidence of a link-list-only repository.</li>
 </ul>
 </html>"""
-    out.write_text(doc)
+    out.write_text(doc, encoding="utf-8")
     print(f"written: {out}  ({len(doc)} chars)")
     return 0
 

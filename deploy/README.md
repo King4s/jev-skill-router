@@ -95,9 +95,12 @@ kill-after grace period, and logs termination plus the final exit status.
 | `/var/lib/jev-skill-router/skills.previous.db` | Same owner/group/mode as live DB | One consistent rollback snapshot, created only on successful publication |
 
 Create a dedicated non-login account `jev-skill-refresh`, separate from the runtime
-account. Install only the reviewed batch binary, `router.py` and
-`requirements-offline.txt`; install its pinned dependency into the private offline
-venv, not globally. The root process reads the protected credential and launches
+account. Install only the reviewed batch binary and the coherent offline Python
+bundle: `router.py`, its sibling modules `decision_providers.py` and
+`provider_priority.py`, `provider-priority.json`, and `requirements-offline.txt`.
+The sibling imports are required even for indexing; their optional routing support
+does not add a provider call to the refresh batch. Install the pinned dependency
+into the private offline venv, not globally. The root process reads the protected credential and launches
 GitHub CLI/indexing with `setpriv`, no supplementary groups and a cleared explicit
 environment. Network and YAML handling run under the unprivileged refresh account.
 The account cannot write the runtime DB directory, the installed code, the curated
@@ -155,8 +158,10 @@ its physical file hash differs from the original because it was made with `VACUU
 Authenticated deployed MCP wire/security smoke and real Jev ranking then passed
 against the **new** identity (40 accepted candidates, `jev-1.13.0`). PID 1773473 and
 restart count zero remained unchanged: actual next-request uptake was verified,
-not inferred from file replacement. No other project's code changed. Only the source
-correction PR #4 was merged; native implementation PR #1 remains unmerged.
+not inferred from file replacement. No other project's code changed. At the time
+of this live measurement, only source-correction PR #4 had been merged; native
+implementation PR #1 was still unmerged. Repository publication is separate from
+these deployment receipts and does not update the installed executable or indexer.
 These are successful **manual exact-cron-command** receipts, not proof that the next
 scheduled 03:20 tick has already occurred.
 
