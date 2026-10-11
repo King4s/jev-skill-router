@@ -183,6 +183,14 @@ def read_sources(path: Path) -> list[tuple[str, str]]:
     return out
 
 
+def cmd_sources(args) -> int:
+    sources = read_sources(Path(args.sources))
+    if not sources:
+        raise ValueError("No sources: refusing an accidental empty rebuild")
+    print(json.dumps(sources))
+    return 0
+
+
 def gh_api(path: str):
     r = subprocess.run(["gh", "api", "-H", "Accept: application/vnd.github+json", path],
                        capture_output=True, text=True, timeout=60)
@@ -675,6 +683,7 @@ def cmd_selftest(args) -> int:
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = p.add_subparsers(dest="cmd", required=True)
+    s = sub.add_parser("sources"); s.add_argument("--sources", default=SOURCES); s.set_defaults(fn=cmd_sources)
     a = sub.add_parser("index"); a.add_argument("--db", default=DB); a.add_argument("--sources", default=SOURCES); a.add_argument("--workers", type=int, default=16); a.set_defaults(fn=cmd_index)
     b = sub.add_parser("stats"); b.add_argument("--db", default=DB); b.set_defaults(fn=cmd_stats)
     c = sub.add_parser("route"); c.add_argument("project"); c.add_argument("--db", default=DB); c.add_argument("--top", type=int, default=40); c.add_argument("--show", type=int, default=25); c.add_argument("--rule", choices=RULES, default="plain"); c.add_argument("--out"); c.set_defaults(fn=cmd_route)

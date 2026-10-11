@@ -98,6 +98,22 @@ class ReviewChecks(unittest.TestCase):
             result = router.cmd_route(args)
         return result, json.loads(out.read_text()) if out.exists() else None, call
 
+    def test_sources_cli_reuses_parser_and_rejects_empty_lists(self):
+        self.sources.write_text('## 1. Vendor\n- [a](https://github.com/example/repo)\n'
+                                '## 2. Community\nexample/second\n'
+                                '## Flagged / excluded\nexample/excluded\n')
+        with patch.object(sys, 'argv', ['router.py', 'sources', '--sources', str(self.sources)]):
+            self.assertEqual(router.main(), 0)
+        self.assertEqual(json.loads(self.output.getvalue()),
+                         [['example/repo', 'vendor'], ['example/second', 'community']])
+        self.sources.write_text('## Flagged / excluded\nexample/excluded\n')
+        self.output.truncate(0)
+        self.output.seek(0)
+        with patch.object(sys, 'argv', ['router.py', 'sources', '--sources', str(self.sources)]), \
+             contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(router.main(), 1)
+        self.assertEqual(self.output.getvalue(), '')
+
     def test_discovery_failure_preserves_all_published_rows(self):
         before = self.snapshot()
         with patch.object(router, 'gh_api', return_value=None):

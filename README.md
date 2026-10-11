@@ -123,7 +123,30 @@ flowchart LR
   bodies. Source rows remain available via duplicate pointers; metadata equality does not
   prove equal instructions.
 - The service reads candidates and provenance in a single read transaction. It cannot
-  rebuild or mutate the corpus. Refresh and deployment remain explicit operator actions.
+  rebuild or mutate the corpus. The optional [daily refresh job](deploy/README.md#automatic-source-list-consumption)
+  follows the current GitHub-main source list outside the MCP runtime, validates a complete
+  rebuilt snapshot, and atomically publishes it. Failed refreshes retain the live index.
+
+### Automatic source-list consumption
+
+`Skills-list.md` is input to the indexer, **not a file parsed on each MCP request**.
+The separate Rust `jev-skill-refresh` batch utility pins the list's current GitHub-main
+commit, downloads only that Markdown file, and runs the already approved offline indexer
+under a dedicated non-login account. It never pulls or executes new repository code.
+
+The supplied cron entry runs daily at **03:20 in the host's local timezone** when installed.
+It uses the existing cron daemon, an exclusive refresh lock, a three-hour deadline and
+journal logging. Publication checks exact source/tier membership, complete path accounting,
+zero download/parser failures, cache/duplicate/FTS consistency and SQLite integrity.
+The previous snapshot is retained for rollback; the MCP process stays read-only and does
+not restart. In-flight requests keep their old coherent snapshot; later requests reopen
+that published at the same path.
+
+The list producer's stated weekly update cadence is separate from this daily consumer:
+this job does not perform weekly research or edit the curated source list. A missing
+listed repository fails the entire refresh; it is never silently dropped. See the
+[deployment guide](deploy/README.md#automatic-source-list-consumption) for installation,
+manual execution, failure diagnostics and rollback.
 
 ## Safety and limits
 

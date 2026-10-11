@@ -2,6 +2,7 @@
 name = "jev-skill-router"
 version = "0.1.0"
 edition = "2021"
+default-run = "jev-skill-router"
 license = "MIT"
 description = "Read-only MCP skill retrieval and TypeSafe Jev ranking"
 repository = "https://github.com/King4s/jev-skill-router"
