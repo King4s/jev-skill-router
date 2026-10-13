@@ -79,13 +79,19 @@ pub fn stats(path: &Path) -> Result<Value> {
     )
 }
 
-pub fn search(path: &Path, text: &str, top: Option<i64>) -> Result<Value> {
+pub fn search(
+    path: &Path,
+    text: &str,
+    top: Option<i64>,
+    exclusions: Option<&Path>,
+) -> Result<Value> {
     let top = validate(text, top)?;
     let words = tokens(text);
     let db = open(path)?;
     // One read snapshot covers both candidates and their corpus identity.
     let tx = db.unchecked_transaction()?;
     let corpus = meta(&tx)?;
+    let (blocked, exclusion_meta) = crate::exclusions::resolve(&tx, exclusions)?;
     let mut positive = Vec::new();
     for word in &words {
         let found: i64 = tx.query_row(
@@ -100,20 +106,81 @@ pub fn search(path: &Path, text: &str, top: Option<i64>) -> Result<Value> {
     let mut candidates = Vec::new();
     if !positive.is_empty() {
         let mut stmt = tx.prepare("SELECT s.id,s.name,s.desc,s.repo,s.url,s.tier,bm25(skills_fts) AS r FROM skills_fts JOIN skills s ON s.id=skills_fts.rowid WHERE skills_fts MATCH ?1 AND s.dup_of IS NULL ORDER BY r LIMIT ?2")?;
-        for row in stmt.query_map(rusqlite::params![positive.join(" OR "), top as i64], |r| {
+        for row in stmt.query_map(rusqlite::params![positive.join(" OR "), if blocked.is_empty() { top as i64 } else { -1 }], |r| {
             Ok(json!({"id": r.get::<_,i64>(0)?, "name": r.get::<_,String>(1)?,
                 "desc": r.get::<_,String>(2)?, "repo": r.get::<_,String>(3)?,
                 "url": r.get::<_,String>(4)?, "tier": r.get::<_,String>(5)?, "bm25": r.get::<_,f64>(6)?}))
-        })? { candidates.push(row?); }
+        })? {
+            let candidate = row?;
+            if !blocked.contains(&candidate["id"].as_i64().unwrap()) {
+                candidates.push(candidate);
+                if candidates.len() == top { break; }
+            }
+        }
     }
     Ok(
-        json!({"candidates": candidates, "meta": {"top":top,"rule":"plain","query_tokens":words,"corpus":corpus}}),
+        json!({"candidates": candidates, "meta": {"top":top,"rule":"plain","query_tokens":words,"corpus":corpus,"exclusions":exclusion_meta}}),
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn exclusions_reload_refill_and_fail_closed() {
+        let dir = std::env::temp_dir().join(format!("jev-exclusions-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("skills.db");
+        let gate = dir.join("exclusions.json");
+        let db = Connection::open(&path).unwrap();
+        db.execute_batch("CREATE TABLE skills(id INTEGER PRIMARY KEY,name TEXT,desc TEXT,repo TEXT,path TEXT,url TEXT,tier TEXT,dup_of INTEGER);
+            CREATE TABLE sources(repo TEXT);
+            CREATE VIRTUAL TABLE skills_fts USING fts5(name,desc);
+            INSERT INTO skills VALUES(1,'PDF','PDF PDF PDF','owner/repo','bad/SKILL.md','url','vendor',NULL),
+            (2,'PDF','PDF','owner/repo','safe/SKILL.md','url','vendor',NULL),
+            (3,'PDF','PDF','other/repo','bad/SKILL.md','url','vendor',NULL),
+            (4,'PDF','PDF','alias/repo','alias/SKILL.md','url','vendor',1),
+            (5,'PDF','PDF','alias/repo','alias/SKILL.md','url','vendor',3);
+            INSERT INTO skills_fts(rowid,name,desc) SELECT id,name,desc FROM skills;").unwrap();
+        drop(db);
+        let publish = |repo: &str, skill: &str| {
+            let next = dir.join("next.json");
+            std::fs::write(&next, json!({"version":1,"entries":[{"repo":repo,"path":skill,"revision":"a".repeat(40),"evidence_id":"b".repeat(64),"reason":"fixture"}]}).to_string()).unwrap();
+            std::fs::rename(next, &gate).unwrap();
+        };
+        let ids = |value: &Value| {
+            value["candidates"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|c| c["id"].as_i64().unwrap())
+                .collect::<Vec<_>>()
+        };
+        let baseline = search(&path, "PDF", Some(1), None).unwrap();
+        assert_eq!(ids(&baseline), vec![1]);
+        publish("owner/repo", "bad/SKILL.md");
+        let filtered = search(&path, "PDF", Some(2), Some(&gate)).unwrap();
+        assert_eq!(ids(&filtered).len(), 2);
+        assert!(!ids(&filtered).contains(&1));
+        assert!(ids(&filtered).contains(&2));
+        assert!(ids(&filtered).contains(&3));
+        assert_eq!(filtered["meta"]["exclusions"]["canonical_count"], 1);
+        publish("alias/repo", "alias/SKILL.md");
+        let aliases = search(&path, "PDF", Some(2), Some(&gate)).unwrap();
+        assert_eq!(ids(&aliases), vec![2]);
+        assert_eq!(aliases["meta"]["exclusions"]["canonical_count"], 2);
+        publish("owner/repo", "safe/SKILL.md");
+        assert_eq!(
+            ids(&search(&path, "PDF", Some(1), Some(&gate)).unwrap()),
+            vec![1]
+        );
+        std::fs::write(&gate, "{").unwrap();
+        assert!(search(&path, "PDF", None, Some(&gate)).is_err());
+        std::fs::remove_file(&gate).unwrap();
+        assert!(search(&path, "", None, Some(&gate)).is_err());
+        assert_eq!(ids(&search(&path, "PDF", Some(1), None).unwrap()), vec![1]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
     #[test]
     fn tokens_and_limits() {
         assert_eq!(

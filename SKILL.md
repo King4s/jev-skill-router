@@ -68,9 +68,13 @@ reject the affected batch. Existing `ranked`, `rejected`, `degraded`, `candidate
 and corpus fields remain; inspect `meta.provider`, `meta.requested_model` and
 `meta.response_models`. `meta.model` is null when batch models are absent or differ.
 
-This feature is **not production-deployed**. Dated 2026-10-11 Jev receipts do not
-prove native switching or live Perplexity success. Reconcile the deployed peer's
-unpublished screening/exclusion changes before installing this branch.
+Native configurable providers were merged in PR #5. Publication is separate from
+installation; dated 2026-10-11 Jev receipts do not prove a later deployment or live
+Perplexity success. Preserve any configured `SKILL_ROUTER_EXCLUSIONS` policy during
+upgrades: exact repo/path exclusions apply before top truncation to both search
+and routing, reload per request, and follow duplicate pointers to canonical IDs.
+Missing or invalid configured policy refuses search and routing; init/stats remain
+available. No policy is configured by default, and indexing is not a safety guarantee.
 
 ## Python offline tooling
 

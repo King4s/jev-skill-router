@@ -4,10 +4,11 @@ The native binary supports stdio for local clients and authenticated, stateless
 Streamable HTTP for shared internal clients. Runtime code/data must not depend
 on an operator's home directory. No public proxy or public port is required.
 
-**Not yet deployed:** native configurable decision providers are feature-branch
-work. Reconcile the deployed peer's unpublished screening/exclusion changes before
-installing this branch. The dated 2026-10-11 receipts below describe the earlier
-Jev deployment and snapshot, not native switching or live Perplexity success.
+Native configurable providers were merged in PR #5. This release preserves the
+previously deployed native exclusion guard; an upgrade must retain its configured
+policy and existing authentication. A merged commit is not evidence of installation.
+The dated 2026-10-11 receipts below describe the earlier Jev deployment and snapshot,
+not a later binary rollout or live Perplexity success.
 
 ## Layout
 
@@ -64,6 +65,30 @@ The [unit](jev-skill-router.service) starts `/opt/jev-skill-router/jev-skill-rou
 protects system/home/kernel paths, removes capabilities, bounds resources and sends
 logs to journald. The database is deliberately root-owned and not a mutable
 `StateDirectory`: both SQLite and filesystem permissions prevent runtime writes.
+
+## Exact-skill exclusion policy
+
+Set `SKILL_ROUTER_EXCLUSIONS` to the operator-managed manifest when the existing
+screening loop requires filtering. Preserve its environment/drop-in during binary
+upgrades; do not remove it merely to make a deployment start. The runtime never
+writes policy, edits upstream sources, uninstalls skills or runs screening scripts.
+
+The JSON contract is `{"version":1,"entries":[...]}`. Entries contain `repo`, an
+exact relative `path` ending in `SKILL.md`, a 40-hex `revision`, and a 64-hex
+`evidence_id`. Publication belongs to the separately approved screening process;
+keep the file readable but not writable by the runtime account. Admission is
+bounded to a regular file of 1 MiB and 10,000 entries. Matching follows exact
+repo/path across corpus revisions and duplicate pointers to canonical IDs; a
+safe sibling skill in the same repository remains eligible.
+
+Each search/route request opens policy once, so atomic rename replaces policy for
+the next request without restarting. Filtering occurs before `top` truncation,
+allowing eligible candidates to refill the shortlist. Missing, unreadable, corrupt
+or invalid configured policy refuses search/routing, including empty queries,
+while initialization and stats remain available. Unset configuration disables the
+filter explicitly; an empty valid manifest is active with zero entries. Inspect
+`meta.exclusions` in successful search/route results. Filtering does not certify
+all remaining skills as safe.
 
 ## First installation
 
