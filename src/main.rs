@@ -1,6 +1,7 @@
 mod corpus;
 mod digits;
 mod jev;
+mod providers;
 
 use anyhow::{bail, Context, Result};
 use axum::{
@@ -27,9 +28,7 @@ use tokio::sync::Semaphore;
 struct Router {
     db: PathBuf,
     client: reqwest::Client,
-    key: Arc<String>,
-    url: String,
-    model: String,
+    provider: Arc<providers::Provider>,
     permits: Arc<Semaphore>,
 }
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -72,7 +71,7 @@ impl Router {
         Ok(result(value))
     }
     #[tool(
-        description = "Retrieve deduplicated skill metadata with SQLite FTS5 BM25. Does not call Jev or execute skills."
+        description = "Retrieve deduplicated skill metadata with SQLite FTS5 BM25. Does not call a decision provider or execute skills."
     )]
     async fn skills_search(
         &self,
@@ -87,7 +86,7 @@ impl Router {
         Ok(result(value))
     }
     #[tool(
-        description = "Retrieve skills then rank with one TypeSafe Jev Score per candidate. Partial results are marked degraded; skills are never installed or executed."
+        description = "Retrieve skills then rank with one typed decision Score per candidate using the selected provider. Partial results are marked degraded; skills are never installed or executed."
     )]
     async fn skills_route(
         &self,
@@ -105,32 +104,18 @@ impl Router {
             .map_err(error)?;
         let candidates = value["candidates"].as_array().unwrap();
         let started = Instant::now();
-        let raw = if candidates.is_empty() {
-            json!({})
-        } else {
-            if self.key.is_empty() {
-                return Err(ErrorData::internal_error(
-                    "TYPESAFE_API_KEY is required for ranking",
-                    None,
-                ));
-            }
-            jev::call(
-                &self.client,
-                &self.url,
-                &self.key,
-                jev::payload(&p.project, candidates, &self.model),
-            )
+        let ranking = jev::route(&self.client, &self.provider, &p.project, candidates)
             .await
-            .map_err(error)?
-        };
-        let (ranked, rejected) = jev::rank(candidates, &raw);
-        let failed = !candidates.is_empty() && ranked.is_empty();
+            .map_err(error)?;
+        let failed = !candidates.is_empty() && ranking.ranked.is_empty();
         value["project"] = json!(p.project);
-        value["degraded"] = json!(!rejected.is_empty());
-        value["ranked"] = json!(ranked);
-        value["rejected"] = json!(rejected);
-        value["meta"]["model"] = raw.get("model").cloned().unwrap_or(Value::Null);
-        value["meta"]["requested_model"] = json!(self.model);
+        value["degraded"] = json!(!ranking.rejected.is_empty());
+        value["meta"]["model"] = ranking.model();
+        value["meta"]["response_models"] = json!(ranking.models);
+        value["ranked"] = json!(ranking.ranked);
+        value["rejected"] = json!(ranking.rejected);
+        value["meta"]["requested_model"] = json!(self.provider.model);
+        value["meta"]["provider"] = json!(self.provider.name);
         value["meta"]["created_at"] = json!(chrono::Utc::now().to_rfc3339());
         value["meta"]["latency_s"] = json!(started.elapsed().as_secs_f64());
         let mut output = result(value);
@@ -175,27 +160,14 @@ fn internal_bind(addr: std::net::SocketAddr) -> bool {
 async fn main() -> Result<()> {
     let db = PathBuf::from(std::env::var("SKILL_ROUTER_DB").unwrap_or_else(|_| "skills.db".into()));
     corpus::stats(&db).context("A usable, existing database is required")?;
-    let key = std::env::var("TYPESAFE_API_KEY").unwrap_or_default();
-    let url =
-        std::env::var("JEV_API").unwrap_or_else(|_| "https://api.typesafe.ai/v1/systemone".into());
-    let endpoint = reqwest::Url::parse(&url)?;
-    if endpoint.scheme() != "https"
-        && !(endpoint.scheme() == "http"
-            && endpoint
-                .host_str()
-                .is_some_and(|h| ["127.0.0.1", "localhost", "[::1]"].contains(&h)))
-    {
-        bail!("JEV_API must use HTTPS (loopback HTTP is permitted for offline tests)");
-    }
+    let provider = Arc::new(providers::load()?);
     let router = Router {
         db,
         client: reqwest::Client::builder()
             .timeout(Duration::from_secs(180))
             .redirect(reqwest::redirect::Policy::none())
             .build()?,
-        key: Arc::new(key),
-        url,
-        model: std::env::var("JEV_MODEL").unwrap_or_else(|_| "jev-latest".into()),
+        provider,
         permits: Arc::new(Semaphore::new(4)),
     };
     if !std::env::args().any(|a| a == "--http") {

@@ -35,3 +35,5 @@ jobs:
           cargo build --release --locked
       - name: Actual stdio and HTTP MCP integration (offline provider)
         run: python3 -B scripts/mcp_smoke.py --binary ./target/release/jev-skill-router
+      - name: Actual compiled native provider wire regressions (loopback fixtures)
+        run: python3 -B scripts/provider_smoke.py --binary ./target/release/jev-skill-router

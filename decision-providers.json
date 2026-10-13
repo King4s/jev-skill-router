@@ -1,0 +1,17 @@
+{
+  "default": "jev",
+  "profiles": {
+    "jev": {
+      "endpoint": "https://api.typesafe.ai/v1/systemone",
+      "model": "jev-latest",
+      "key_env": "TYPESAFE_API_KEY",
+      "endpoint_env": "JEV_API",
+      "model_env": "JEV_MODEL"
+    },
+    "perplexity": {
+      "endpoint": "https://api.perplexity.ai/v1/decisions",
+      "model": "pplx-decider-v1.1-27b",
+      "key_env": "PERPLEXITY_API_KEY"
+    }
+  }
+}

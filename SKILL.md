@@ -1,12 +1,13 @@
 ---
 name: jev-skill-router
-description: Recommend third-party skills with a decision maker like Jev, Perplexity Decisions, or both.
+description: Recommend third-party skills with a configured typed decision provider; Python also supports ordered failover.
 ---
 
 # Jev Skill Router
 
 Find project-relevant skills from the current index snapshot. Code retrieves
-candidates from local SQLite FTS5. Native Rust MCP uses Jev (TypeSafe System One);
+candidates from local SQLite FTS5. Native Rust MCP selects one configured typed
+decision provider at startup (shipped profiles: Jev and Perplexity Decisions);
 optional Python offline tooling selects Jev, Perplexity Decisions, or both.
 The router **recommends** — it never installs or activates skills.
 
@@ -22,8 +23,10 @@ The router **recommends** — it never installs or activates skills.
 - Python 3 with SQLite FTS5 and the pinned offline dependency: create/activate the project `.venv` and install `requirements-offline.txt` as documented in the README.
 - `gh` authenticated — needed by `index`.
 - Python CLI: `TYPESAFE_API_KEY` in the environment, or the key at `~/.config/jev-loop/typesafe_api_key`.
-- Native Rust MCP: supply `TYPESAFE_API_KEY` explicitly in the client/service environment;
-  the runtime never reads an operator's fallback key file.
+- Native Rust MCP: supply the selected profile's `key_env` variable in the protected
+  client/service environment (`TYPESAFE_API_KEY` for Jev, `PERPLEXITY_API_KEY` for
+  Perplexity). The runtime never reads an operator's fallback key file. Stats,
+  search and empty routes need no key; nonempty ranking needs the selected key/model.
 - Python CLI Perplexity: `PERPLEXITY_API_KEY`. For `both`: at least one usable
   provider credential; configuring both enables fallback when the preferred provider fails.
 - An index built at least once. If `skills.db` is missing, build it first.
@@ -36,7 +39,38 @@ with `SKILL_ROUTER_DB` set to the existing index. This serves stdio MCP and expo
 For an already deployed internal Streamable HTTP endpoint, use its `/mcp` URL and
 Bearer token from a protected environment; do not run another daemon unnecessarily.
 See `deploy/README.md` for isolation and transport requirements. The Rust runtime
-uses read-only SQLite and direct Jev HTTP, not a Python or shell wrapper.
+uses read-only SQLite and direct typed Decisions HTTP, not a Python or shell wrapper.
+
+Set `SKILL_ROUTER_PROVIDERS_FILE` to the approved non-secret profile file; otherwise
+the process reads cwd `decision-providers.json`. The shipped file defaults to `jev`;
+`SKILL_ROUTER_PROVIDER` selects another configured profile at **startup**, not per
+tool request. Restart after profile edits, reselection or environment changes.
+DB-only snapshot replacement does not require a restart.
+
+Profiles require `endpoint`, `model`, `key_env`, with optional `endpoint_env` and
+`model_env` override names. Model IDs come from that file or opted-in environment
+variables, not Rust defaults. Only the selected profile's key variable is read.
+Shipped Jev opts into `JEV_API`/`JEV_MODEL`; shipped Perplexity ignores them and has
+no implicit model override. Additional compatible typed Decisions profiles need
+no code changes; chat APIs are not adapters. Native has no fallback, fanout or
+`both` policy. Without the implicit cwd file, legacy Jev uses `TYPESAFE_API_KEY`,
+optional `JEV_API`, and a **required explicit `JEV_MODEL`** for nonempty ranking.
+Missing explicit files, invalid profiles and fileless non-Jev selection fail closed.
+
+Native `top` is 1–300 (default 40). Ranking uses at most 128 questions per batch,
+preflights every serialized batch against 128 KiB before any provider call, and
+shares the strict 0.04 weighted-score validator across providers (probability-sum
+tolerance 0.02). Responses are bounded to 2 MiB; each provider request has at most
+four attempts. Routing has four shared non-queueing permits. Endpoints allow HTTPS
+or loopback HTTP only, with no redirects and refusal of Retry-After delays over
+30 seconds. Unknown answer IDs
+reject the affected batch. Existing `ranked`, `rejected`, `degraded`, `candidates`
+and corpus fields remain; inspect `meta.provider`, `meta.requested_model` and
+`meta.response_models`. `meta.model` is null when batch models are absent or differ.
+
+This feature is **not production-deployed**. Dated 2026-10-11 Jev receipts do not
+prove native switching or live Perplexity success. Reconcile the deployed peer's
+unpublished screening/exclusion changes before installing this branch.
 
 ## Python offline tooling
 
@@ -62,7 +96,9 @@ On Windows, use `python` if `python3` is unavailable. `--provider` overrides
 `SKILL_ROUTER_PROVIDER`; Jev is the Python default. Model overrides are `--jev-model`
 and `--perplexity-model`, or `JEV_MODEL` and `PERPLEXITY_DECISION_MODEL`.
 `--priority-profile` overrides `SKILL_ROUTER_PRIORITY_PROFILE`; otherwise use the
-shipped `provider-priority.json`. These options do not apply to native MCP.
+shipped `provider-priority.json`. CLI flags, priority/failover and report policy are
+Python-only; native also recognizes `SKILL_ROUTER_PROVIDER` and the shipped Jev
+profile opts into `JEV_MODEL`, but selection happens at startup.
 
 ## Quick Reference
 
@@ -78,7 +114,9 @@ shipped `provider-priority.json`. These options do not apply to native MCP.
 1. Check `stats`. No rows → run `index` first (it needs network and takes minutes).
 2. Write the project description concretely: stack, deliverable, constraints. Vague input
    gives vague candidates — the FTS5 shortlist is only as good as the words in it.
-3. Use the provider mode the user selected. Run `route`; inspect status,
+3. For native MCP, use the operator-selected startup profile; inspect `degraded`,
+   rejections and `meta` provider/model provenance. The remainder of this step is
+   **Python-only**. Use the provider mode the user selected. Run `route`; inspect status,
    `priority.order`, `priority.basis`, provider errors, score, and confidence.
    In `both`, use the preferred provider first: higher measured accuracy wins,
    and lower measured cost breaks exact accuracy ties. The shipped external
@@ -97,7 +135,7 @@ shipped `provider-priority.json`. These options do not apply to native MCP.
 ## Pitfalls
 
 - **`score` alone is not a verdict.** Provider confidence is not calibrated on this
-  corpus. Confidence is `provider_reported`, with `score_disagreement: null`;
+  corpus. In Python output, confidence is `provider_reported`, with `score_disagreement: null`;
   read `provider_scores` and `used_providers` too.
 - **Priority evidence has a scope.** The shipped profile uses an external choice
   benchmark, not measured skill-routing accuracy. Prefer representative,
@@ -124,6 +162,9 @@ shipped `provider-priority.json`. These options do not apply to native MCP.
 `python3 router.py selftest` must print `all checks passed`. For a route run, check the
 ranked count plus rejected count equals `candidates` length, and inspect `degraded`.
 Run `python3 -B -m unittest -v test_router` for offline regression checks.
+For native offline profile/Decisions checks, run
+`python3 -B scripts/provider_smoke.py --binary ./target/release/jev-skill-router`
+after building the binary; CI wiring accompanies the feature, not live-provider proof.
 `eval_shortlist.py --require N --rule plain` gates the active default rather than the
 best experiment. Top 40 remains the default; `--top` is bounded at 300 and serialized
 requests at 128 KiB. Larger retrieval pools are not a validated ranking improvement.
