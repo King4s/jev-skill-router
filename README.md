@@ -26,11 +26,12 @@ The Python indexer (with PyYAML) and evaluation scripts are **offline tooling**.
 The Rust service opens SQLite read-only and calls the selected provider directly: no Python wrapper,
 shell subprocess, or skill execution in the runtime.
 
-**Feature-branch status:** native configurable providers are not production-deployed.
-The 2026-10-11 live receipts below are historical Jev/snapshot evidence, not proof
-of this feature or live Perplexity success. Before installation, reconcile the
-deployed peer's unpublished screening/exclusion work with this branch; do not
-replace it blindly.
+Native configurable providers were merged in [PR #5](https://github.com/King4s/jev-skill-router/pull/5).
+This release also preserves the existing exact-skill exclusion guard: both search
+and routing filter before truncating the shortlist and reload configured policy
+on each request. Repository publication does not itself update a running service.
+The dated 2026-10-11 receipts below remain historical Jev/snapshot evidence, not
+proof of a later deployment or live Perplexity success.
 
 ## Quick start
 
@@ -41,7 +42,7 @@ This checkout includes the native implementation introduced by
 The refresh utility consumes `main`'s source list without importing its executable code.
 
 ```sh
-git clone --branch feat/native-decision-providers --single-branch https://github.com/King4s/jev-skill-router.git
+git clone https://github.com/King4s/jev-skill-router.git
 cd jev-skill-router
 python3 -m venv .venv
 . .venv/bin/activate
@@ -241,6 +242,7 @@ cargo clippy --locked -- -D warnings
 cargo build --release --locked
 python3 -B scripts/mcp_smoke.py --binary ./target/release/jev-skill-router
 python3 -B scripts/provider_smoke.py --binary ./target/release/jev-skill-router
+python3 -B scripts/exclusions_smoke.py ./target/release/jev-skill-router
 ```
 
 The MCP smoke harness executes the **real Rust binary**, stdio handshake/EOF and HTTP
@@ -257,6 +259,12 @@ strict validation, batch-local unknown IDs, model provenance, redirect and long
 Retry-After refusals, and oversized-later-batch preflight against offline fixtures.
 Its CI wiring accompanies this feature.
 It is not evidence of a live Perplexity call or a production deployment.
+
+The exclusion smoke command exercises the compiled native consumer with a synthetic
+corpus and loopback provider: exact-path filtering and top refill, safe sibling
+retention, duplicate-to-canonical mapping, atomic reload, missing/corrupt policy
+refusal, and provider input containing only eligible candidates. It never writes
+the deployed policy or corpus.
 
 ## Optional Python decision providers
 
@@ -403,6 +411,7 @@ Databases, caches, binaries and local measurement artifacts are ignored, not shi
 | Variable | Default / purpose |
 |---|---|
 | `SKILL_ROUTER_DB` | `skills.db`; existing SQLite snapshot |
+| `SKILL_ROUTER_EXCLUSIONS` | Unset disables filtering; a configured manifest is required, validated and reloaded per search/route request |
 | `SKILL_ROUTER_PROVIDERS_FILE` | Cwd `decision-providers.json`; explicit paths must be readable; loaded once at startup |
 | `SKILL_ROUTER_PROVIDER` | File's `default` (`jev` in the shipped file); selects one profile at startup |
 | Profile `key_env` | Selected profile's named environment variable; required for nonempty ranking |

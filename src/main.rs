@@ -1,5 +1,6 @@
 mod corpus;
 mod digits;
+mod exclusions;
 mod jev;
 mod providers;
 
@@ -27,6 +28,7 @@ use tokio::sync::Semaphore;
 #[derive(Clone)]
 struct Router {
     db: PathBuf,
+    exclusions: Option<PathBuf>,
     client: reqwest::Client,
     provider: Arc<providers::Provider>,
     permits: Arc<Semaphore>,
@@ -79,10 +81,13 @@ impl Router {
     ) -> std::result::Result<CallToolResult, ErrorData> {
         corpus::validate(&p.query, p.top).map_err(invalid)?;
         let path = self.db.clone();
-        let value = tokio::task::spawn_blocking(move || corpus::search(&path, &p.query, p.top))
-            .await
-            .map_err(|_| ErrorData::internal_error("Database worker failed", None))?
-            .map_err(error)?;
+        let exclusions = self.exclusions.clone();
+        let value = tokio::task::spawn_blocking(move || {
+            corpus::search(&path, &p.query, p.top, exclusions.as_deref())
+        })
+        .await
+        .map_err(|_| ErrorData::internal_error("Database worker failed", None))?
+        .map_err(error)?;
         Ok(result(value))
     }
     #[tool(
@@ -98,10 +103,13 @@ impl Router {
         })?;
         let path = self.db.clone();
         let project = p.project.clone();
-        let mut value = tokio::task::spawn_blocking(move || corpus::search(&path, &project, p.top))
-            .await
-            .map_err(|_| ErrorData::internal_error("Database worker failed", None))?
-            .map_err(error)?;
+        let exclusions = self.exclusions.clone();
+        let mut value = tokio::task::spawn_blocking(move || {
+            corpus::search(&path, &project, p.top, exclusions.as_deref())
+        })
+        .await
+        .map_err(|_| ErrorData::internal_error("Database worker failed", None))?
+        .map_err(error)?;
         let candidates = value["candidates"].as_array().unwrap();
         let started = Instant::now();
         let ranking = jev::route(&self.client, &self.provider, &p.project, candidates)
@@ -163,6 +171,7 @@ async fn main() -> Result<()> {
     let provider = Arc::new(providers::load()?);
     let router = Router {
         db,
+        exclusions: std::env::var_os("SKILL_ROUTER_EXCLUSIONS").map(PathBuf::from),
         client: reqwest::Client::builder()
             .timeout(Duration::from_secs(180))
             .redirect(reqwest::redirect::Policy::none())
