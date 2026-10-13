@@ -184,9 +184,14 @@ def offline(binary):
         provider = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Provider)
         thread = threading.Thread(target=provider.serve_forever, daemon=True); thread.start()
         port = free_port(); token = 'offline-token-not-a-real-secret-0123456789'
+        fixture_config = Path(tmp) / 'test-only-providers.json'
+        fixture_config.write_text(json.dumps({'default': 'jev', 'profiles': {'jev': {
+            'endpoint': f'http://127.0.0.1:{provider.server_port}/',
+            'model': 'offline-fixture', 'key_env': 'TYPESAFE_API_KEY'}}}))
         env = {**os.environ, 'SKILL_ROUTER_DB': str(dbpath), 'SKILL_ROUTER_BIND': f'127.0.0.1:{port}',
                'SKILL_ROUTER_TOKEN': token, 'TYPESAFE_API_KEY': 'offline-key',
-               'JEV_API': f'http://127.0.0.1:{provider.server_port}/'}
+               'SKILL_ROUTER_PROVIDERS_FILE': str(fixture_config), 'SKILL_ROUTER_PROVIDER': 'jev',
+               'JEV_MODEL': 'offline-fixture', 'JEV_API': f'http://127.0.0.1:{provider.server_port}/'}
         proc = subprocess.Popen([binary, '--http'], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         try:
             wait_ready(proc, port)
@@ -237,7 +242,7 @@ def offline(binary):
                 db.execute('UPDATE skills SET desc=?', (long_description,))
                 db.execute('UPDATE skills_fts SET desc=?', (long_description,))
             reply = client.tool('skills_route', {'project': 'Read PDF files'})
-            assert failed(reply) and 'exceeds 131072 bytes' in json.dumps(reply), reply
+            assert failed(reply) and 'exceeds 128 KiB' in json.dumps(reply), reply
             assert Provider.calls == 0
             print('offline MCP: UTF-8 limits, >2MiB response, >128KiB request before provider, four held slots/fifth fail-fast and release passed')
             print('offline MCP: handshake, tools, Python parity, auth, Host/Origin, fixed/chunked limits, ranking contracts and retries passed')

@@ -4,19 +4,28 @@ The native binary supports stdio for local clients and authenticated, stateless
 Streamable HTTP for shared internal clients. Runtime code/data must not depend
 on an operator's home directory. No public proxy or public port is required.
 
+**Not yet deployed:** native configurable decision providers are feature-branch
+work. Reconcile the deployed peer's unpublished screening/exclusion changes before
+installing this branch. The dated 2026-10-11 receipts below describe the earlier
+Jev deployment and snapshot, not native switching or live Perplexity success.
+
 ## Layout
 
 | Path | Ownership | Purpose |
 |---|---|---|
 | `/opt/jev-skill-router/jev-skill-router` | root:root, 0755 | Tested release binary; not writable by service |
 | `/var/lib/jev-skill-router/skills.db` | root:jev-skill-router, 0640 | Published snapshot; read-only to service |
+| `/etc/jev-skill-router.providers.json` | root:root, 0644 | Approved non-secret runtime profiles; readable, not writable by service |
 | `/etc/jev-skill-router.env` | root:root, 0600 | Provider key, MCP token and explicit configuration |
 | `/etc/systemd/system/jev-skill-router.service` | root:root, 0644 | Supplied isolated unit |
 
 Create a dedicated non-login system account `jev-skill-router`. Data directory
 permissions are 0750 root:jev-skill-router; code is 0755 root:root. Systemd reads the
 protected environment file before dropping privileges. The process only needs
-read access to the database, not read access to the credential file itself.
+read access to the database and profile file, not read access to the credential
+file itself. Install the approved `decision-providers.json` as
+`/etc/jev-skill-router.providers.json` with root ownership and mode 0644; never put
+keys in it or make it writable by the runtime account.
 
 Set these explicit values in the protected environment file, using your site's
 Tailnet address and credentials rather than committing an environment file:
@@ -24,9 +33,32 @@ Tailnet address and credentials rather than committing an environment file:
 - `SKILL_ROUTER_DB=/var/lib/jev-skill-router/skills.db`
 - `SKILL_ROUTER_BIND=<tailnet-ip>:3016`
 - `SKILL_ROUTER_TOKEN=<random-secret-at-least-32-ascii-bytes>`
-- `TYPESAFE_API_KEY=<typesafe-key>`
-- `JEV_API=https://api.typesafe.ai/v1/systemone`
-- `JEV_MODEL=jev-latest`
+- `SKILL_ROUTER_PROVIDERS_FILE=/etc/jev-skill-router.providers.json`
+- `SKILL_ROUTER_PROVIDER=jev` (or another approved profile, such as `perplexity`)
+- The selected profile's key variable: `TYPESAFE_API_KEY=<typesafe-key>` for Jev,
+  or `PERPLEXITY_API_KEY=<perplexity-key>` for Perplexity; keep it in this protected file.
+
+Selection occurs once at **process startup**. The runtime file defines `default`
+and `profiles`; the supplied default is `jev`. An explicit
+`SKILL_ROUTER_PROVIDER` overrides it. Each profile defines `endpoint`, `model` and
+`key_env`, optionally `endpoint_env` and `model_env`. Model IDs are runtime data,
+not Rust defaults; only the selected profile's key variable is read. Shipped Jev
+opts into `JEV_API`/`JEV_MODEL`; shipped Perplexity does not implicitly use Jev
+variables or Python's `PERPLEXITY_DECISION_MODEL`. Use the profile file or explicit
+override names to change its endpoint/model.
+
+Other compatible typed Decisions profiles require no code changes, but must use
+the same request and Score-answer contract, not a chat API. There is no native
+fallback, fanout or `both` policy. HTTPS or loopback HTTP only is accepted, with
+redirects disabled. A missing selected key permits stats/search/empty routes, but
+nonempty ranking requires that key and model. Invalid profiles fail startup.
+
+The implicit default file is cwd `decision-providers.json`, not a path relative
+to the binary. Do not rely on systemd's working directory: set the explicit file
+variable above. An unreadable/missing explicit file fails startup. Only a missing
+implicit cwd file enables legacy Jev using `TYPESAFE_API_KEY`, optional `JEV_API`
+and a **required explicit `JEV_MODEL`** for nonempty ranking; no hardcoded model
+default is supplied. A fileless non-Jev selection fails.
 
 The [unit](jev-skill-router.service) starts `/opt/jev-skill-router/jev-skill-router --http`,
 protects system/home/kernel paths, removes capabilities, bounds resources and sends
@@ -40,7 +72,8 @@ logs to journald. The database is deliberately root-owned and not a mutable
    discovered paths against rows plus recorded skips. Never deploy a failed refresh.
 3. Make a consistent database copy with SQLite's backup API; verify its corpus identity
    and integrity before installing. Copying a DB while a writer runs is not a backup.
-4. Install only this service's account, binary, snapshot, environment and unit. Validate
+4. Install only this service's account, binary, snapshot, non-secret profiles,
+   protected environment and unit. Validate
    the unit with `systemd-analyze verify` before enabling it.
 5. Start the unit; verify initialize, tools/list, skills_stats, skills_search and a live
    skills_route through `/mcp`. Compare the returned corpus identity to the source copy.
@@ -48,23 +81,30 @@ logs to journald. The database is deliberately root-owned and not a mutable
    from a second Tailnet host. Inspect actual listener and process identity.
 
 `systemctl is-active` or a listening socket alone is not delivery evidence. The
-real provider call must preserve all candidates and disclose model, timing and
-rejections. Synthetic smoke fixtures are not an alternative to this check.
+real provider call must preserve all candidates and disclose `meta.provider`,
+`meta.requested_model`, per-batch `meta.response_models`, timing and rejections.
+`meta.model` is null when batch response models are missing or differ. Existing
+ranked/rejected/degraded/candidate/corpus fields are retained. Synthetic smoke
+fixtures, including `scripts/provider_smoke.py`, are not an alternative to this
+check; do not claim a selected operator works live without its actual receipt.
 
 ## Refresh / upgrade / rollback
 
 Build a new snapshot with the offline indexer, outside the protected service tree.
 A successful index refresh is atomic; network/parser failures retain the last good DB.
-Back up the deployed binary and snapshot before an upgrade. Install the validated
-replacement under a temporary filename with correct ownership/mode, then rename
-it into place. Restart after a binary change and verify the live endpoint again.
+Back up the deployed binary, profiles, protected environment and snapshot before
+an upgrade. Install the validated replacement under a temporary filename with
+correct ownership/mode, then rename
+it into place. Restart after a binary change, profile edits/reselection or selected
+key/model/endpoint environment changes, and verify the live endpoint again.
 
 For snapshot-only replacements, each request opens one read transaction: in-flight
 requests retain their old coherent snapshot; later requests open the new one. Keep
 SQLite sidecars out of file-only copies by using the backup API.
 
-Rollback means restoring the exact previous binary and snapshot, restarting and
-repeating the authenticated smoke. On a first install, disable/stop this unit to
+Rollback means restoring the exact previous binary, profiles, protected environment
+and snapshot, restarting and repeating the authenticated smoke. On a first install,
+disable/stop this unit to
 remove the new runtime without touching other projects. Keep credentials, data and
 source until the owner authorizes permanent removal.
 
@@ -135,13 +175,13 @@ cannot turn an invalid list into a valid one. In particular, a listed 404 reposi
 blocks the full refresh; it is never silently excluded or reclassified. Correcting
 the source authority is a separate owner-approved change. On 2026-10-11, both
 isolated preflight and the **installed batch utility using the exact cron command**
-failed at `wanghuan9/skilldock` in the current 109-source list. The journal recorded
+failed at `wanghuan9/skilldock` in the then-current 109-source list. The journal recorded
 `discovery_failed` with that repo and `refresh_exit_status=1`; the live DB SHA-256
 remained `1e93dda087ac38ac946e95916f61d129419fcf73cebb2eedb30f67d6ecd8195b`.
 The source-authority blocker was subsequently resolved with explicit owner approval
 in the one-file [PR #4](https://github.com/King4s/jev-skill-router/pull/4): only
 `wanghuan9/skilldock` moved to documented `Flagged / excluded`, retaining its metadata.
-The installed exact-cron-command run then **published the current 108-source snapshot**
+The installed exact-cron-command run then **published the then-current 108-source snapshot**
 on 2026-10-11 at 20:56:43 host-local time, with `refresh_exit_status=0`.
 It consumed pinned authority commit `08c34ec43e26fceb9d922351b86d6b14a4ab65fb`.
 
@@ -164,6 +204,9 @@ implementation PR #1 was still unmerged. Repository publication is separate from
 these deployment receipts and does not update the installed executable or indexer.
 These are successful **manual exact-cron-command** receipts, not proof that the next
 scheduled 03:20 tick has already occurred.
+
+Source counts in these receipts are historical; weekly source-list updates may
+change current membership. They are not fresh verification of this feature branch.
 
 For manual execution, use the same root batch binary and timeout/logger command
 as the supplied cron entry. For a snapshot-only rollback, acquire the same refresh

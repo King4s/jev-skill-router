@@ -2,9 +2,9 @@
 
 # Jev Skill Router
 
-### Find the right skills. Let code retrieve. Let Jev judge.
+### Retrieve skill metadata and rank it with a selected decision provider.
 
-**GitHub metadata → SQLite FTS5 → TypeSafe Jev → ranked recommendations**
+**GitHub metadata → SQLite FTS5 → typed decision provider → ranked recommendations**
 
 [![Verification](https://github.com/King4s/jev-skill-router/actions/workflows/verify.yml/badge.svg)](https://github.com/King4s/jev-skill-router/actions/workflows/verify.yml)
 ![Runtime: Rust](https://img.shields.io/badge/runtime-Rust-orange)
@@ -19,22 +19,29 @@
 
 A native Rust MCP server that recommends third-party agent skills for a project.
 It retrieves deduplicated metadata with SQLite FTS5/BM25, then sends **one comparable
-Jev Score per candidate in a single provider request**. It never installs or executes skills.
+typed Score per candidate**, in batches of at most 128 questions, to one configured
+provider. It never installs or executes skills.
 
 The Python indexer (with PyYAML) and evaluation scripts are **offline tooling**.
-The Rust service opens SQLite read-only and calls TypeSafe directly: no Python wrapper,
+The Rust service opens SQLite read-only and calls the selected provider directly: no Python wrapper,
 shell subprocess, or skill execution in the runtime.
+
+**Feature-branch status:** native configurable providers are not production-deployed.
+The 2026-10-11 live receipts below are historical Jev/snapshot evidence, not proof
+of this feature or live Perplexity success. Before installation, reconcile the
+deployed peer's unpublished screening/exclusion work with this branch; do not
+replace it blindly.
 
 ## Quick start
 
 Requirements: Rust/Cargo, Python 3 with SQLite FTS5, authenticated [GitHub CLI](https://cli.github.com/),
-and a [TypeSafe API key](https://console.typesafe.ai/keys) for ranking. Retrieval needs no model key.
+and the selected decision provider's API key for ranking. Retrieval needs no model key.
 This checkout includes the native implementation introduced by
 [PR #1](https://github.com/King4s/jev-skill-router/pull/1).
 The refresh utility consumes `main`'s source list without importing its executable code.
 
 ```sh
-git clone https://github.com/King4s/jev-skill-router.git
+git clone --branch feat/native-decision-providers --single-branch https://github.com/King4s/jev-skill-router.git
 cd jev-skill-router
 python3 -m venv .venv
 . .venv/bin/activate
@@ -44,14 +51,49 @@ python3 -B router.py stats
 cargo build --release --locked
 ```
 
-Put `TYPESAFE_API_KEY` in your client's protected environment. Start a **stdio MCP** server:
+Put the selected profile's key in your client's protected environment (`TYPESAFE_API_KEY`
+for the shipped default Jev profile). Start a **stdio MCP** server:
 
 ```sh
-SKILL_ROUTER_DB="$PWD/skills.db" ./target/release/jev-skill-router
+SKILL_ROUTER_DB="$PWD/skills.db" SKILL_ROUTER_PROVIDERS_FILE="$PWD/decision-providers.json" ./target/release/jev-skill-router
 ```
 
 The client owns stdin/stdout. Logs go to stderr; closing stdin shuts down the process.
 The native service does **not** read Python's fallback key file. Supply its key explicitly.
+
+### Native decision providers
+
+At **process startup**, the runtime loads `decision-providers.json` from its current
+working directory, or the explicit `SKILL_ROUTER_PROVIDERS_FILE` path. The file's
+`default` is `jev`; `SKILL_ROUTER_PROVIDER` overrides that profile selection. This
+is not a per-tool-request option. Profile edits, reselection and environment changes
+require a process restart, unlike a DB-only snapshot replacement.
+
+The shipped non-secret [profiles](decision-providers.json) are:
+
+| Profile | Endpoint | Model in the runtime file | Key environment variable |
+|---|---|---|---|
+| `jev` | `https://api.typesafe.ai/v1/systemone` | `jev-latest` | `TYPESAFE_API_KEY` |
+| `perplexity` | `https://api.perplexity.ai/v1/decisions` | `pplx-decider-v1.1-27b` | `PERPLEXITY_API_KEY` |
+
+Model IDs come from the runtime file or an explicitly configured environment
+override, not Rust defaults. Each profile requires `endpoint`, `model` and `key_env`;
+optional `endpoint_env` and `model_env` name its allowed overrides. The shipped Jev
+profile opts into `JEV_API` and `JEV_MODEL`. Perplexity does not implicitly read those
+variables (or `PERPLEXITY_DECISION_MODEL`); change its file values or explicitly add
+its own override names. Only the selected profile's `key_env` is read for credentials.
+
+Add other compatible **typed Decisions** profiles without code changes: the endpoint
+must accept the same `model`/`state`/`questions` request and return typed Score answers
+keyed by question ID. This is not a generic chat-API adapter. Native selection has
+no automatic fallback, fanout or `both` policy; Python's priority profile is not used.
+
+A missing selected key does not block startup, stats, search or empty routes;
+nonempty ranking requires both a selected key and model. Invalid configuration fails
+startup. Only a missing implicit cwd file enables legacy Jev mode: it reads
+`TYPESAFE_API_KEY`, permits `JEV_API`, and **requires an explicit `JEV_MODEL` for
+nonempty ranking**. There is no hardcoded model default. A missing explicit file or
+a fileless non-Jev selection fails instead of silently switching providers.
 
 ### Shared internal endpoint
 
@@ -71,12 +113,18 @@ and [the supplied systemd unit](deploy/jev-skill-router.service).
 |---|---|---|
 | `skills_stats` | None | Canonical/duplicate counts, coverage, snapshot identity |
 | `skills_search` | `query`, optional `top` | BM25 candidates and corpus/query provenance; no provider call |
-| `skills_route` | `project`, optional `top` | Ranked/rejected candidates, score, confidence, probabilities and actual model/timing |
+| `skills_route` | `project`, optional `top` | Ranked/rejected candidates, score, confidence, probabilities and provider/model/timing provenance |
 
 `top` defaults to **40** and must be an integer in **1–300**. Text is limited to
 **16 KiB of UTF-8**. Empty or out-of-vocabulary queries return an empty candidate set.
 A route with candidates but no valid provider answers is an MCP tool error; a partial
 route preserves the entire shortlist and sets `degraded=true`.
+
+Native output retains `ranked`, `rejected`, `degraded`, `candidates` and corpus/query
+fields. `meta.provider` identifies the selected profile, `meta.requested_model` the
+configured model, and `meta.response_models` the response model for each batch
+(null when absent). `meta.model` is null if batch models are missing or differ;
+otherwise it is their shared response model, not the requested alias.
 
 **Scores measure relevance, not permission to install.** Read the upstream skill and
 inspect confidence as well as score before making a separate installation decision.
@@ -89,12 +137,13 @@ flowchart LR
     B --> C[Bounded frontmatter + blob-SHA cache]
     C --> D[Atomic SQLite snapshot]
     D --> E[Read-only FTS5 shortlist]
-    E --> F[One Jev Score per candidate]
+    E --> F[One typed Score per candidate]
     F --> G[Validated ranked recommendations]
 ```
 
 - The [current GitHub-main `Skills-list.md`](https://github.com/King4s/jev-skill-router/blob/main/Skills-list.md)
-  is the refresh authority. The current list contains 108 included GitHub sources.
+  is the refresh authority. Its source count can change with weekly updates; the
+  108-source count below belongs to the dated 2026-10-11 receipt, not a current guarantee.
   Numbered sections map to provenance tiers; the flagged/excluded section is not ingested. Site-only
   registries and GitLab/Hugging Face entries are documented, not implied GitHub coverage.
 - Each GitHub source uses metadata → encoded branch ref → pinned recursive tree.
@@ -152,7 +201,7 @@ listed repository fails the entire refresh; it is never silently dropped. See th
 [deployment guide](deploy/README.md#automatic-source-list-consumption) for installation,
 manual execution, failure diagnostics and rollback.
 
-**Verified live on 2026-10-11:** the installed job published the current **108-source**
+**Verified live on 2026-10-11:** the installed job published the then-current **108-source**
 authority after the owner-approved single-source exclusion in [PR #4](https://github.com/King4s/jev-skill-router/pull/4).
 The MCP endpoint served the new snapshot without a restart: **15,682 canonical records**,
 **26,098 source rows**, **26,596 fully accounted paths**, zero fetch/parse failures,
@@ -167,15 +216,16 @@ this successful manual run does not claim the next scheduled tick has already oc
 | Database | Existing file required; read-only opens; snapshot-consistent retrieval |
 | HTTP | Bearer auth, exact bound Host, reject Origin, 256 KiB actual-body limit including chunked requests |
 | Ranking capacity | Four shared, non-queueing permits; excess requests fail explicitly |
-| Provider budget | 128 KiB serialized request; 2 MiB response; 180-second per-attempt timeout |
-| Retries | At most four attempts; bounded backoff/Retry-After; permanent errors fail immediately |
+| Provider budget | At most 128 questions and 128 KiB per serialized batch; all batches preflighted before the first provider call; 2 MiB per response; 180-second per-attempt timeout |
+| Provider endpoint | HTTPS, or loopback HTTP only; no URL credentials, query or fragment; redirects disabled |
+| Retries | At most four attempts per request; bounded backoff/Retry-After; delays over 30 seconds fail; permanent errors fail immediately |
 | Provider trust | Finite JSON numbers, exact probability keys, bounded probabilities, normalized sum and score consistency |
-| Error handling | Unknown answer IDs reject the response; partial/no-valid distinctions preserved; no provider fallback |
-| Credentials | Environment only for native runtime; provider bodies and transport errors not echoed |
+| Error handling | Unknown answer IDs reject the affected batch; partial/no-valid distinctions preserved; no provider fallback |
+| Credentials | Only the selected profile's key environment variable; provider bodies and transport errors not echoed |
 
 Probability normalization permits a 0.02 rounding tolerance; the four-level weighted
 mean permits 0.04. These are validation tolerances, not claims of model accuracy.
-Jev can rank only the retrieved shortlist. Wider retrieval is not automatically better ranking.
+The selected provider can rank only the retrieved shortlist. Wider retrieval is not automatically better ranking.
 
 ## Verification
 
@@ -190,6 +240,7 @@ cargo test --locked
 cargo clippy --locked -- -D warnings
 cargo build --release --locked
 python3 -B scripts/mcp_smoke.py --binary ./target/release/jev-skill-router
+python3 -B scripts/provider_smoke.py --binary ./target/release/jev-skill-router
 ```
 
 The MCP smoke harness executes the **real Rust binary**, stdio handshake/EOF and HTTP
@@ -200,10 +251,18 @@ Its temporary database and synthetic provider are explicitly **offline fixtures*
 live TypeSafe integration. `--url <internal-mcp-url> --live --out <route.json>` exercises
 a deployed endpoint with the real provider, using `SKILL_ROUTER_TOKEN` from the environment.
 
+The separate provider smoke command checks native profile/credential/model selection,
+startup configuration replacement, keyless retrieval, 129/300-candidate batching,
+strict validation, batch-local unknown IDs, model provenance, redirect and long
+Retry-After refusals, and oversized-later-batch preflight against offline fixtures.
+Its CI wiring accompanies this feature.
+It is not evidence of a live Perplexity call or a production deployment.
+
 ## Optional Python decision providers
 
 Provider selection below is **Python offline/evaluation tooling only**. The native
-Rust MCP remains Jev-only; these options do not change its runtime or MCP tools.
+Rust MCP uses the startup profiles above; Python's CLI modes, priority/failover
+and report fields below do not configure native routing.
 
 ```
 python3 router.py index                      # build/refresh the index (network, ~10 min)
@@ -344,9 +403,13 @@ Databases, caches, binaries and local measurement artifacts are ignored, not shi
 | Variable | Default / purpose |
 |---|---|
 | `SKILL_ROUTER_DB` | `skills.db`; existing SQLite snapshot |
-| `TYPESAFE_API_KEY` | Required only when non-empty candidate sets are ranked |
-| `JEV_API` | `https://api.typesafe.ai/v1/systemone`; HTTPS, or loopback HTTP for offline tests |
-| `JEV_MODEL` | `jev-latest` |
+| `SKILL_ROUTER_PROVIDERS_FILE` | Cwd `decision-providers.json`; explicit paths must be readable; loaded once at startup |
+| `SKILL_ROUTER_PROVIDER` | File's `default` (`jev` in the shipped file); selects one profile at startup |
+| Profile `key_env` | Selected profile's named environment variable; required for nonempty ranking |
+| `TYPESAFE_API_KEY` | Shipped Jev and fileless legacy Jev key |
+| `PERPLEXITY_API_KEY` | Shipped Perplexity key; never substitutes for a Jev key |
+| `JEV_API` | Override only for profiles opting in, including shipped/legacy Jev; legacy endpoint is `https://api.typesafe.ai/v1/systemone` |
+| `JEV_MODEL` | Override only for profiles opting in; required for fileless legacy ranking; no Rust model default |
 | `SKILL_ROUTER_BIND` | `127.0.0.1:3016`; HTTP only |
 | `SKILL_ROUTER_TOKEN` | Required for HTTP; no default secret |
 
@@ -364,6 +427,6 @@ These Studio components are **planned**, not implemented by this CLI change.
 Adding a connector alone does not install or activate recommended skills.
 
 The Studio plan describes an optional adapter around the Python pipeline, not a
-change to the existing native Jev-only MCP server.
+change to the native MCP server's startup provider selection.
 
 All source, comments, documentation, CLI output and new commit messages are in English.
