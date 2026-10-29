@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import subprocess
 import sys
 import tempfile
 from types import SimpleNamespace
@@ -385,6 +386,22 @@ class ReviewChecks(unittest.TestCase):
                         result = 1
                     self.assertNotEqual(result, 0)
                     call.assert_not_called()
+
+    def test_github_json_is_read_as_utf8_not_the_windows_codepage(self):
+        """gh JSON with non-ASCII paths must not be decoded with the legacy code page."""
+        expected = {"tree": [{"path": "ā/SKILL.md", "type": "blob"}]}
+        payload = json.dumps(expected, ensure_ascii=False).encode("utf-8")
+        real_run = subprocess.run
+
+        def github_fixture(arguments, **options):
+            # Emulate Windows' default code page unless the client asked for UTF-8.
+            options.setdefault("encoding", "cp1252")
+            return real_run([sys.executable, "-c",
+                             f"import sys; sys.stdout.buffer.write({payload!r})"], **options)
+
+        with patch.object(router.subprocess, "run", side_effect=github_fixture):
+            result = router.gh_api("repos/example/skills/git/trees/main?recursive=1")
+        self.assertEqual(result, expected)
 
     def test_http_permanent_failure_attempted_once(self):
         for code in (401, 422):

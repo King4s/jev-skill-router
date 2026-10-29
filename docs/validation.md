@@ -128,3 +128,14 @@ The `ignore_cleanup_errors=True` workaround added earlier to the new test class 
 once the handles were closed, so a future leak fails the suite instead of being hidden.
 Linux (WSL, Python 3.12.3) still reports 35 + 79 passing tests and a clean selftest.
 
+### GitHub JSON encoding (2026-10-29)
+
+`gh_api` now pins `encoding="utf-8"`. Without it, `text=True` decodes with the legacy
+Windows code page and raises `UnicodeDecodeError` on the first non-ASCII `SKILL.md` path in
+a repository tree, which aborted `index`. The offline regression test drives the real
+subprocess with a UTF-8 payload while the client's default is cp1252, so it fails on the old
+behaviour and passes on the fix, on any platform.
+
+Counts after this change: `test_router` **36 tests pass**, `discover -s tests` **79 pass**,
+`selftest` clean, on Windows 11 / Python 3.11.16 and on Linux (WSL, Python 3.12.3).
+
