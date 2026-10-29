@@ -713,6 +713,14 @@ def _skill_key(name: str) -> str:
     return _fold(str(name)).casefold()
 
 
+def _home() -> Path | None:
+    """Path.home() raises when the environment has no home; that is not a route failure."""
+    try:
+        return Path.home()
+    except (RuntimeError, OSError):
+        return None
+
+
 def default_install_roots() -> list[Path]:
     """Where installed skills normally live on this machine.
 
@@ -721,7 +729,9 @@ def default_install_roots() -> list[Path]:
     configured = [p for p in os.environ.get("SKILL_ROUTER_INSTALL_ROOTS", "").split(os.pathsep) if p.strip()]
     if configured:
         return [Path(p).expanduser() for p in configured]
-    home = Path.home()
+    home = _home()
+    if home is None:
+        return []
     roots = [home / ".agents" / "skills", home / ".hermes" / "skills",
              home / ".claude" / "skills", home / ".codex" / "skills",
              home / "AppData" / "Local" / "hermes" / "skills"]
@@ -767,12 +777,16 @@ def find_installed(roots: list[Path]) -> dict[str, str]:
 def annotate_installed(ranked: list[dict], installed: dict[str, str]) -> list[str]:
     """Mark every ranked row with local presence and return missing names, in rank order."""
     missing: list[str] = []
+    seen: set[str] = set()
     for row in ranked:
         path = installed.get(_skill_key(row.get("name") or ""))
         row["installed"] = path is not None
         row["installed_path"] = path
         if path is None and row.get("name"):
-            missing.append(str(row["name"]))
+            key, name = _skill_key(row["name"]), str(row["name"])
+            if key not in seen:          # one absent skill, however many repos carry it
+                seen.add(key)
+                missing.append(name)
     return missing
 
 
@@ -808,9 +822,10 @@ def cmd_route(args) -> int:
                   "error": str(error)}
     latency = time.perf_counter() - started
     ranked, rejected = result["ranked"], result["rejected"]
-    checked = not getattr(args, "no_install_check", False)
     roots = ([Path(p).expanduser() for p in getattr(args, "installed_root", None) or []]
              or default_install_roots())
+    # No resolvable tree means nothing is known about installations, so do not claim a status.
+    checked = bool(roots) and not getattr(args, "no_install_check", False)
     installed = find_installed(roots) if checked else {}
     missing = annotate_installed(ranked, installed) if checked else []
 
@@ -888,6 +903,7 @@ def cmd_selftest(args) -> int:
     assert annotate_installed(rows, {"pdf": "/x/SKILL.md"}) == ["Absent Skill"], "install detection"
     assert rows[0]["installed"] and rows[0]["installed_path"] == "/x/SKILL.md"
     assert not rows[1]["installed"] and rows[1]["installed_path"] is None
+    assert annotate_installed([{"name": "Same"}, {"name": "same"}], {}) == ["Same"], "duplicate names"
     print("selftest: all checks passed")
     return 0
 

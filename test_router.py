@@ -478,7 +478,8 @@ class InstallAwareness(unittest.TestCase):
     """A recommended skill that is not installed is flagged, and the run asks about it."""
 
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(dir=os.environ.get('TMPDIR'))
+        self.tmp = tempfile.TemporaryDirectory(dir=os.environ.get('TMPDIR'),
+                                               ignore_cleanup_errors=True)
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
         self.path = self.root / 'skills.db'
@@ -537,6 +538,16 @@ class InstallAwareness(unittest.TestCase):
         self.assertIn('Ask the user whether to install', text)
         self.assertIn('[installed]', text)
         self.assertIn('[not installed]', text)
+
+    def test_missing_home_skips_the_check_instead_of_crashing_the_route(self):
+        with patch.object(router.Path, 'home', side_effect=RuntimeError('no home directory')):
+            self.assertEqual(router.default_install_roots(), [])
+            code, text = self.route(installed_root=None)
+        self.assertEqual(code, 0)
+        doc = json.loads((self.root / 'out.json').read_text())
+        self.assertFalse(doc['meta']['install_scan']['checked'])
+        self.assertNotIn('[install]', text)
+        self.assertNotIn('[local]', text)
 
     def test_no_install_check_keeps_the_run_silent_about_installs(self):
         code, text = self.route(no_install_check=True)

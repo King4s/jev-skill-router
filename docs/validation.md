@@ -82,10 +82,11 @@ remain acceptance gates for the planned integration.
 Scope: the Python `route` command and the skill instructions. The native MCP output is
 unchanged, so nothing here claims installation status for MCP clients.
 
-- `python3 -B -m unittest test_router`: **34 tests pass** (31 existing + 3 new), covering
+- `python3 -B -m unittest test_router`: **35 tests pass** (31 existing + 4 new), covering
   both skill-tree layouts (`skills/<name>/` and `skills/<group>/<name>/`), case-insensitive
-  name matching, missing and file roots, the `[install]` line, `meta.install_scan`, and
-  `--no-install-check`.
+  name matching, missing and file roots, the `[install]` line, `meta.install_scan`,
+  `--no-install-check`, duplicate names collapsing to one entry, and a machine with no
+  resolvable home directory (which skips the check instead of failing the route).
 - `python3 -B -m unittest discover -s tests`: **79 tests pass**, unchanged.
 - `python3 -B router.py selftest`: `all checks passed`, now also asserting install
   annotation.
