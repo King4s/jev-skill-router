@@ -2,6 +2,7 @@ mod corpus;
 mod digits;
 mod exclusions;
 mod jev;
+mod openai;
 mod providers;
 
 use anyhow::{bail, Context, Result};

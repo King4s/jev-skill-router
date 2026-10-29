@@ -4,6 +4,12 @@
 
 ### Added
 
+- Explicit opt-in OpenAI Decisions support in Python (`--provider openai`) and
+  native profiles (`wire_format: "openai_decisions"`), using `gpt-6-luna` and
+  `OPENAI_API_KEY`. Named arrays are normalized for the existing score validator;
+  duplicate/unknown names fail and refusals remain rejected. Defaults and the
+  Perplexity/Jev `both` policy are unchanged. Offline contract and native wire
+  fixtures cover translation, batching, partial answers and credential selection.
 - `index --max-parse-failures N` publishes an index when up to N upstream `SKILL.md` files
   fail YAML parsing, recording each one in `index_skips` with reason `parse_failed`. The
   default stays strict (0) and fetch failures always abort, so a network problem can never

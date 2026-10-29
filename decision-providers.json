@@ -8,6 +8,13 @@
       "endpoint_env": "JEV_API",
       "model_env": "JEV_MODEL"
     },
+    "openai": {
+      "endpoint": "https://api.openai.com/v1/decisions",
+      "model": "gpt-6-luna",
+      "key_env": "OPENAI_API_KEY",
+      "model_env": "OPENAI_DECISION_MODEL",
+      "wire_format": "openai_decisions"
+    },
     "perplexity": {
       "endpoint": "https://api.perplexity.ai/v1/decisions",
       "model": "pplx-decider-v1.1-27b",

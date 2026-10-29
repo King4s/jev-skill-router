@@ -5,11 +5,20 @@ use std::{collections::BTreeMap, io::Read};
 const FILE_LIMIT: usize = 65536;
 const PROFILE_LIMIT: usize = 32;
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WireFormat {
+    #[default]
+    Systemone,
+    OpenaiDecisions,
+}
+
 pub struct Provider {
     pub name: String,
     pub endpoint: String,
     pub model: String,
     pub key: String,
+    pub wire_format: WireFormat,
 }
 
 #[derive(Deserialize)]
@@ -27,6 +36,8 @@ struct Profile {
     key_env: String,
     endpoint_env: Option<String>,
     model_env: Option<String>,
+    #[serde(default)]
+    wire_format: WireFormat,
 }
 
 fn identifier(s: &str, environment: bool) -> bool {
@@ -98,6 +109,9 @@ impl Provider {
         if self.key.is_empty() {
             bail!("Selected provider API key is required for ranking");
         }
+        if self.wire_format == WireFormat::OpenaiDecisions && self.model != "gpt-6-luna" {
+            bail!("OpenAI Decisions currently supports only gpt-6-luna");
+        }
         Ok(())
     }
 }
@@ -151,6 +165,7 @@ fn select(bytes: Option<&[u8]>, env: impl Fn(&str) -> Option<String>) -> Result<
                 key_env: "TYPESAFE_API_KEY".into(),
                 endpoint_env: Some("JEV_API".into()),
                 model_env: Some("JEV_MODEL".into()),
+                wire_format: WireFormat::Systemone,
             },
         )
     };
@@ -181,6 +196,7 @@ fn select(bytes: Option<&[u8]>, env: impl Fn(&str) -> Option<String>) -> Result<
         endpoint,
         model,
         key,
+        wire_format: profile.wire_format,
     })
 }
 

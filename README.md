@@ -81,6 +81,7 @@ The shipped non-secret [profiles](decision-providers.json) are:
 |---|---|---|---|
 | `jev` | `https://api.typesafe.ai/v1/systemone` | `jev-latest` | `TYPESAFE_API_KEY` |
 | `perplexity` | `https://api.perplexity.ai/v1/decisions` | `pplx-decider-v1.1-27b` | `PERPLEXITY_API_KEY` |
+| `openai` | `https://api.openai.com/v1/decisions` | `gpt-6-luna` | `OPENAI_API_KEY` |
 
 Model IDs come from the runtime file or an explicitly configured environment
 override, not Rust defaults. Each profile requires `endpoint`, `model` and `key_env`;
@@ -88,6 +89,17 @@ optional `endpoint_env` and `model_env` name its allowed overrides. The shipped 
 profile opts into `JEV_API` and `JEV_MODEL`. Perplexity does not implicitly read those
 variables (or `PERPLEXITY_DECISION_MODEL`); change its file values or explicitly add
 its own override names. Only the selected profile's `key_env` is read for credentials.
+
+The optional OpenAI profile uses `wire_format: "openai_decisions"` and permits
+`OPENAI_DECISION_MODEL`. Other profiles default to `wire_format: "systemone"`.
+The OpenAI adapter translates the shared evidence, named score questions and
+ordered levels to the [OpenAI Decisions API](https://developers.openai.com/api/docs/guides/decisions),
+then normalizes named answer/probability arrays for the existing score validator.
+Duplicate or unknown answer names fail the batch; missing, refused or malformed
+scores are rejected without discarding valid answers from other questions.
+Only `gpt-6-luna` is currently accepted for this format. Select it explicitly with
+`SKILL_ROUTER_PROVIDER=openai`; the default stays Jev. All serialized OpenAI
+batches are checked against the same 128-question/128-KiB limits before any call.
 
 Add other compatible **typed Decisions** profiles without code changes: the endpoint
 must accept the same `model`/`state`/`questions` request and return typed Score answers
@@ -317,11 +329,22 @@ and are never written into the repository or routing output:
 |---|---|---|
 | `jev` | `TYPESAFE_API_KEY`, or `~/.config/jev-loop/typesafe_api_key` | `jev-latest` |
 | `perplexity` | `PERPLEXITY_API_KEY` | `pplx-decider-v1.1-27b` |
+| `openai` | `OPENAI_API_KEY` | `gpt-6-luna` |
 | `both` | At least one usable provider credential; unavailable providers are reported and skipped | Available models above |
 
 `--provider` overrides `SKILL_ROUTER_PROVIDER` (default `jev`). Use `--jev-model`
 or `--perplexity-model` to override `JEV_MODEL` or `PERPLEXITY_DECISION_MODEL`.
-Only the selected providers receive requests. Explicit `jev` and `perplexity`
+For OpenAI use `--provider openai`, with optional `--openai-model` or
+`OPENAI_DECISION_MODEL` (currently only `gpt-6-luna` is supported). For example:
+
+```sh
+python3 -B router.py route "Build an accessible dashboard" --provider openai --top 40 --show 5
+```
+
+OpenAI is explicit opt-in: `both` still selects only Perplexity and Jev and does
+not send data to OpenAI. Its existing accuracy/cost priority profile is unchanged;
+adding the adapter does not establish OpenAI routing accuracy or account access.
+Only the selected providers receive requests. Explicit `jev`, `perplexity`, and `openai`
 selections require the chosen provider and never switch services. In `both`, only
 the provider currently needed receives the task and candidate metadata; a missing
 or invalid key/model is reported without blocking use of the other.

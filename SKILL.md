@@ -7,8 +7,8 @@ description: Recommend third-party skills with a configured typed decision provi
 
 Find project-relevant skills from the current index snapshot. Code retrieves
 candidates from local SQLite FTS5. Native Rust MCP selects one configured typed
-decision provider at startup (shipped profiles: Jev and Perplexity Decisions);
-optional Python offline tooling selects Jev, Perplexity Decisions, or both.
+decision provider at startup (shipped profiles: Jev, Perplexity Decisions, and optional OpenAI Decisions);
+optional Python offline tooling selects Jev, Perplexity Decisions, OpenAI Decisions, or both.
 The router **recommends** and marks which recommendations are already installed on this
 machine — it never installs or activates skills.
 
@@ -54,6 +54,15 @@ DB-only snapshot replacement does not require a restart.
 Profiles require `endpoint`, `model`, `key_env`, with optional `endpoint_env` and
 `model_env` override names. Model IDs come from that file or opted-in environment
 variables, not Rust defaults. Only the selected profile's key variable is read.
+The optional `openai` profile uses `wire_format: "openai_decisions"`,
+`https://api.openai.com/v1/decisions`, `gpt-6-luna`, and `OPENAI_API_KEY`.
+This translates requests and responses to the existing internal score contract;
+other profiles default to `wire_format: "systemone"`. Select OpenAI explicitly
+with `SKILL_ROUTER_PROVIDER=openai` at native startup or Python `--provider openai`.
+Python `--openai-model` and `OPENAI_DECISION_MODEL` select its model, currently
+restricted to `gpt-6-luna`. Native uses the profile's declared `model_env` override.
+`both` remains Perplexity/Jev only; defaults, priority evidence, and fallback rules
+are unchanged. This adapter alone does not establish live access or measured quality.
 Shipped Jev opts into `JEV_API`/`JEV_MODEL`; shipped Perplexity ignores them and has
 no implicit model override. Additional compatible typed Decisions profiles need
 no code changes; chat APIs are not adapters. Native has no fallback, fanout or
@@ -90,6 +99,7 @@ python3 router.py index                        # rebuild/refresh (~5 min, networ
 python3 router.py index --max-parse-failures 50 # publish despite broken upstream YAML
 python3 router.py route "<project description>" --top 40
 python3 router.py route "<project description>" --provider perplexity
+python3 router.py route "<project description>" --provider openai
 python3 router.py route "<project description>" --provider both --out ranking.json
 python3 router.py route "<project description>" --provider both --priority-profile my-priority.json
 python3 router.py selftest                     # offline check of the logic
@@ -115,7 +125,7 @@ profile opts into `JEV_MODEL`, but selection happens at startup.
 |---|---|
 | `router.py index` | Harvests frontmatter from every repo in `Skills-list.md`, dedupes, rebuilds FTS5 |
 | `router.py stats` | Counts per tier and repo; lists sources carrying no skills |
-| `router.py route "<text>" --provider jev\|perplexity\|both` | FTS5 shortlist → chosen decision makers → ranked skills |
+| `router.py route "<text>" --provider jev\|perplexity\|openai\|both` | FTS5 shortlist → chosen decision makers → ranked skills |
 | `router.py selftest` | Asserts frontmatter folding, dedupe, FTS5, install detection and the answer contract |
 
 The Python `route` command marks every ranked skill `[installed]` or `[not installed]`

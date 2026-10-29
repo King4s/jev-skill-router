@@ -106,11 +106,20 @@ fn sort_ranked(ranked: &mut [Value]) {
     });
 }
 
-fn prepare_batches(project: &str, candidates: &[Value], model: &str) -> Result<Vec<Vec<u8>>> {
+fn prepare_batches(
+    project: &str,
+    candidates: &[Value],
+    model: &str,
+    wire_format: crate::providers::WireFormat,
+) -> Result<Vec<Vec<u8>>> {
     candidates
         .chunks(128)
         .map(|batch| {
-            let bytes = serde_json::to_vec(&payload(project, batch, model))?;
+            let mut body = payload(project, batch, model);
+            if wire_format == crate::providers::WireFormat::OpenaiDecisions {
+                body = crate::openai::request(&body)?;
+            }
+            let bytes = serde_json::to_vec(&body)?;
             if bytes.len() > REQUEST_LIMIT {
                 bail!("Provider request exceeds 128 KiB; reduce top or candidate metadata");
             }
@@ -197,9 +206,13 @@ pub async fn route(
     }
     provider.require_ready()?;
     // Preflight every batch before the first billable request.
-    let bodies = prepare_batches(project, candidates, &provider.model)?;
+    let bodies = prepare_batches(project, candidates, &provider.model, provider.wire_format)?;
     for (batch, body) in candidates.chunks(128).zip(bodies) {
-        let response = call(client, &provider.endpoint, &provider.key, &body).await?;
+        let mut response = call(client, &provider.endpoint, &provider.key, &body).await?;
+        if provider.wire_format == crate::providers::WireFormat::OpenaiDecisions {
+            response =
+                crate::openai::normalize(response, &payload(project, batch, &provider.model))?;
+        }
         result.add(batch, &response);
     }
     sort_ranked(&mut result.ranked);
@@ -388,6 +401,7 @@ mod tests {
             endpoint: format!("http://{}/decisions", listener.local_addr().unwrap()),
             model: "offline-model".into(),
             key: "synthetic-key".into(),
+            wire_format: crate::providers::WireFormat::Systemone,
         };
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
@@ -444,7 +458,13 @@ mod tests {
             let candidates: Vec<_> = (0..top)
                 .map(|id| json!({"id":id,"name":"a","desc":"b","repo":"c"}))
                 .collect();
-            let bodies = prepare_batches("project", &candidates, "configured-model").unwrap();
+            let bodies = prepare_batches(
+                "project",
+                &candidates,
+                "configured-model",
+                crate::providers::WireFormat::Systemone,
+            )
+            .unwrap();
             assert_eq!(bodies.len(), top.div_ceil(128));
             let total: usize = bodies
                 .iter()
@@ -462,6 +482,12 @@ mod tests {
         }
         let mut candidates = vec![json!({"name":"small"}); 129];
         candidates[128]["desc"] = json!("x".repeat(REQUEST_LIMIT));
-        assert!(prepare_batches("project", &candidates, "configured-model").is_err());
+        assert!(prepare_batches(
+            "project",
+            &candidates,
+            "configured-model",
+            crate::providers::WireFormat::Systemone
+        )
+        .is_err());
     }
 }
