@@ -97,7 +97,8 @@ class ReviewChecks(unittest.TestCase):
     def route(self, response, top=40):
         out = self.root / 'route.json'
         args = SimpleNamespace(db=str(self.path), project='Read PDF files', top=top,
-                               show=25, out=str(out), rule='plain')
+                               show=25, out=str(out), rule='plain',
+                               installed_root=[str(self.root / 'no-installed-skills')])
         with patch.object(router, 'jev_call', return_value=response) as call:
             result = router.cmd_route(args)
         return result, json.loads(out.read_text()) if out.exists() else None, call
@@ -470,6 +471,92 @@ class ReviewChecks(unittest.TestCase):
         self.assertNotIn('10,656', html)
         self.assertNotIn('0.5 s', html)
 
+
+
+
+class InstallAwareness(unittest.TestCase):
+    """A recommended skill that is not installed is flagged, and the run asks about it."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(dir=os.environ.get('TMPDIR'),
+                                               ignore_cleanup_errors=True)
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.path = self.root / 'skills.db'
+        with sqlite3.connect(self.path) as db:
+            db.executescript(router.SCHEMA)
+            for i, name in ((1, 'pdf'), (2, 'mystery-skill')):
+                db.execute('INSERT INTO skills(id,name,desc,tags,tier,repo,path,url,fp) VALUES(?,?,?,?,?,?,?,?,?)',
+                           (i, name, 'Read PDF files mystery', '', 'vendor', 'example/repo',
+                            'skills/%d/SKILL.md' % i, 'https://example.invalid/%s' % name, 'fp%d' % i))
+                db.execute('INSERT INTO skills_fts(rowid,name,desc,tags) VALUES(?,?,?,?)',
+                           (i, name, 'Read PDF files mystery', ''))
+        self.tree = self.root / 'installed'
+        (self.tree / 'pdf').mkdir(parents=True)
+        (self.tree / 'pdf' / 'SKILL.md').write_text('---\nname: pdf\n---\n')
+        (self.tree / 'group' / 'Nested-Skill').mkdir(parents=True)
+        (self.tree / 'group' / 'Nested-Skill' / 'SKILL.md').write_text('---\nname: nested-skill\n---\n')
+        (self.tree / 'not-a-skill').mkdir()
+
+    @staticmethod
+    def fake_scores(project, cands, provider='jev', *args, **kwargs):
+        rows = [{**candidate, 'score': 2.0, 'confidence': 0.7, 'used_providers': [provider],
+                 'provider_errors': {}, 'aggregation': 'single', 'is_fallback': False,
+                 'confidence_kind': 'provider_reported', 'probabilities': {},
+                 'provider_scores': {}, 'score_disagreement': None} for candidate in cands]
+        return {'schema_version': 1, 'project': project, 'provider': provider,
+                'aggregation': 'single', 'status': 'complete', 'used_providers': [provider],
+                'providers': {}, 'priority': None, 'ranked': rows, 'rejected': []}
+
+    def route(self, **overrides):
+        fields = dict(db=str(self.path), project='Read PDF files mystery', top=10, show=10,
+                      out=str(self.root / 'out.json'), rule='plain', provider='jev',
+                      installed_root=[str(self.tree)], no_install_check=False)
+        fields.update(overrides)
+        out = io.StringIO()
+        with patch.object(router, 'score_candidates', side_effect=self.fake_scores), \
+             contextlib.redirect_stdout(out):
+            code = router.cmd_route(SimpleNamespace(**fields))
+        return code, out.getvalue()
+
+    def test_detection_finds_both_layouts_and_tolerates_missing_or_file_roots(self):
+        found = router.find_installed([self.tree, self.root / 'absent', self.path])
+        self.assertEqual(sorted(found), ['nested-skill', 'pdf'])
+        self.assertTrue(found['pdf'].endswith('SKILL.md'))
+        self.assertTrue(Path(found['pdf']).is_file())
+
+    def test_route_marks_missing_skills_and_asks_about_them(self):
+        code, text = self.route()
+        self.assertEqual(code, 0)
+        doc = json.loads((self.root / 'out.json').read_text())
+        ranked = {row['name']: row for row in doc['ranked']}
+        self.assertTrue(ranked['pdf']['installed'])
+        self.assertFalse(ranked['mystery-skill']['installed'])
+        self.assertEqual(doc['meta']['install_scan']['missing'], ['mystery-skill'])
+        self.assertEqual(doc['meta']['install_scan']['installed_count'], 2)
+        self.assertIn('[install] 1 recommended skill(s) are not installed locally: mystery-skill', text)
+        self.assertIn('Ask the user whether to install', text)
+        self.assertIn('[installed]', text)
+        self.assertIn('[not installed]', text)
+
+    def test_missing_home_skips_the_check_instead_of_crashing_the_route(self):
+        with patch.object(router.Path, 'home', side_effect=RuntimeError('no home directory')):
+            self.assertEqual(router.default_install_roots(), [])
+            code, text = self.route(installed_root=None)
+        self.assertEqual(code, 0)
+        doc = json.loads((self.root / 'out.json').read_text())
+        self.assertFalse(doc['meta']['install_scan']['checked'])
+        self.assertNotIn('[install]', text)
+        self.assertNotIn('[local]', text)
+
+    def test_no_install_check_keeps_the_run_silent_about_installs(self):
+        code, text = self.route(no_install_check=True)
+        self.assertEqual(code, 0)
+        doc = json.loads((self.root / 'out.json').read_text())
+        self.assertFalse(doc['meta']['install_scan']['checked'])
+        self.assertNotIn('[install]', text)
+        self.assertNotIn('[local]', text)
+        self.assertTrue(all('installed' not in row for row in doc['ranked']))
 
 if __name__ == '__main__':
     unittest.main()

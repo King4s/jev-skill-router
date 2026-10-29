@@ -76,3 +76,27 @@ The [Studio integration plan](studio-integration-plan.md) is a design document.
 No Studio source was changed and no MCP server was implemented in this change.
 End-to-end installation, automatic skill preparation, and Studio worker loading
 remain acceptance gates for the planned integration.
+
+## Local installation check (2026-10-29)
+
+Scope: the Python `route` command and the skill instructions. The native MCP output is
+unchanged, so nothing here claims installation status for MCP clients.
+
+- `python3 -B -m unittest test_router`: **35 tests pass** (31 existing + 4 new), covering
+  both skill-tree layouts (`skills/<name>/` and `skills/<group>/<name>/`), case-insensitive
+  name matching, missing and file roots, the `[install]` line, `meta.install_scan`,
+  `--no-install-check`, duplicate names collapsing to one entry, and a machine with no
+  resolvable home directory (which skips the check instead of failing the route).
+- `python3 -B -m unittest discover -s tests`: **79 tests pass**, unchanged.
+- `python3 -B router.py selftest`: `all checks passed`, now also asserting install
+  annotation.
+- On this machine the default roots resolve 110 installed skills from `~/.agents/skills`.
+
+Run under WSL Ubuntu (Python 3.12.3, PyYAML 6.0.1) because the Windows host run of the
+legacy suite fails on pre-existing `TemporaryDirectory` cleanup (`WinError 32`, an open
+`skills.db`) and two CLI artefact tests; those failures predate this change and are not
+attributed to it. The new tests pass on both interpreters, and `selftest` passes on
+Windows Python 3.11.16 as well.
+
+No paid provider request was made for this change: routing output is exercised with a
+patched scorer, so the new flags and markers are verified without inference spend.

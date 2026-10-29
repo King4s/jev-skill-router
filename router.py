@@ -701,6 +701,95 @@ def score_candidates(project: str, cands: list[dict], provider: str = "jev",
     return result
 
 
+# ---------------------------------------------------------------- local installs
+
+MAX_INSTALL_DIRS = 5000    # bounded scan: a runaway tree must not stall a route
+# Two layouts count as installed: skills/<name>/SKILL.md and skills/<group>/<name>/SKILL.md.
+MAX_NESTED_PER_ENTRY = 500 # a category with more children than this is not a skill tree
+
+
+def _skill_key(name: str) -> str:
+    """Case- and spacing-insensitive key: 'PDF' and 'pdf' are the same skill."""
+    return _fold(str(name)).casefold()
+
+
+def _home() -> Path | None:
+    """Path.home() raises when the environment has no home; that is not a route failure."""
+    try:
+        return Path.home()
+    except (RuntimeError, OSError):
+        return None
+
+
+def default_install_roots() -> list[Path]:
+    """Where installed skills normally live on this machine.
+
+    SKILL_ROUTER_INSTALL_ROOTS (os.pathsep separated) replaces the defaults, so a
+    deployment can point the check at exactly the trees it trusts."""
+    configured = [p for p in os.environ.get("SKILL_ROUTER_INSTALL_ROOTS", "").split(os.pathsep) if p.strip()]
+    if configured:
+        return [Path(p).expanduser() for p in configured]
+    home = _home()
+    if home is None:
+        return []
+    roots = [home / ".agents" / "skills", home / ".hermes" / "skills",
+             home / ".claude" / "skills", home / ".codex" / "skills",
+             home / "AppData" / "Local" / "hermes" / "skills"]
+    for parent in (home / ".hermes" / "profiles",
+                   home / "AppData" / "Local" / "hermes" / "profiles"):
+        try:
+            roots += [child / "skills" for child in sorted(parent.iterdir()) if child.is_dir()]
+        except OSError:
+            continue
+    return roots
+
+
+def find_installed(roots: list[Path]) -> dict[str, str]:
+    """Map folded skill name -> SKILL.md path for skills present on this machine.
+
+    A directory counts when it holds SKILL.md itself; one extra level is scanned so
+    the skills/<tier>/<name>/SKILL.md layout is found too. An unreadable or missing
+    root is skipped: no install tree is not a routing error."""
+    found: dict[str, str] = {}
+    budget = MAX_INSTALL_DIRS
+    for root in roots:
+        try:
+            entries = sorted(p for p in root.iterdir() if p.is_dir())
+        except OSError:
+            continue
+        for entry in entries:
+            if (entry / "SKILL.md").is_file():
+                found.setdefault(_skill_key(entry.name), str(entry / "SKILL.md"))
+                continue
+            try:
+                nested = sorted(p for p in entry.iterdir() if p.is_dir())[:MAX_NESTED_PER_ENTRY]
+            except OSError:
+                continue
+            for candidate in nested:
+                budget -= 1
+                if budget < 0:
+                    return found
+                if (candidate / "SKILL.md").is_file():
+                    found.setdefault(_skill_key(candidate.name), str(candidate / "SKILL.md"))
+    return found
+
+
+def annotate_installed(ranked: list[dict], installed: dict[str, str]) -> list[str]:
+    """Mark every ranked row with local presence and return missing names, in rank order."""
+    missing: list[str] = []
+    seen: set[str] = set()
+    for row in ranked:
+        path = installed.get(_skill_key(row.get("name") or ""))
+        row["installed"] = path is not None
+        row["installed_path"] = path
+        if path is None and row.get("name"):
+            key, name = _skill_key(row["name"]), str(row["name"])
+            if key not in seen:          # one absent skill, however many repos carry it
+                seen.add(key)
+                missing.append(name)
+    return missing
+
+
 def cmd_route(args) -> int:
     provider = getattr(args, "provider", None) or os.environ.get("SKILL_ROUTER_PROVIDER", "jev")
     if provider not in ("jev", "perplexity", "both"):
@@ -733,6 +822,12 @@ def cmd_route(args) -> int:
                   "error": str(error)}
     latency = time.perf_counter() - started
     ranked, rejected = result["ranked"], result["rejected"]
+    roots = ([Path(p).expanduser() for p in getattr(args, "installed_root", None) or []]
+             or default_install_roots())
+    # No resolvable tree means nothing is known about installations, so do not claim a status.
+    checked = bool(roots) and not getattr(args, "no_install_check", False)
+    installed = find_installed(roots) if checked else {}
+    missing = annotate_installed(ranked, installed) if checked else []
 
     if provider == "both":
         if result["priority"] is not None:
@@ -747,14 +842,20 @@ def cmd_route(args) -> int:
             for name, metadata in result["providers"].items():
                 if metadata.get("error"):
                     print(f"[both] {name}: {metadata['error']}")
-    print(f"\n{'score':>5} {'conf':>5}" + (f" {'delta':>5}" if provider == "both" else "") + "  skill")
+    print(f"\n{'score':>5} {'conf':>5}" + (f" {'delta':>5}" if provider == "both" else "") + "  skill" + ("  [local]" if checked else ""))
     for r in ranked[:args.show]:
         delta = (f" {r['score_disagreement']:5.2f}" if r["score_disagreement"] is not None else f" {'-':>5}") if provider == "both" else ""
         source = f" (using {', '.join(r['used_providers'])})" if provider == "both" else ""
-        print(f"{r['score']:5.2f} {r['confidence']:5.2f}{delta}  {r['name']}  [{r['tier']}] {r['repo']}{source}")
+        local = f"  [{'installed' if r['installed'] else 'not installed'}]" if checked else ""
+        print(f"{r['score']:5.2f} {r['confidence']:5.2f}{delta}  {r['name']}  [{r['tier']}] {r['repo']}{source}{local}")
     if rejected:
         print(f"\n{len(rejected)} candidates rejected without a valid provider score "
               f"(first: {rejected[0]['name']}: {rejected[0]['error']})")
+    if missing:
+        shown = ", ".join(missing[:8]) + (f" (+{len(missing) - 8} more)" if len(missing) > 8 else "")
+        print(f"\n[install] {len(missing)} recommended skill(s) are not installed locally: {shown}")
+        print("[install] Ask the user whether to install each one before working without it; "
+              "not installed is not the same as unavailable, and an uninstalled skill is never loaded.")
     if args.out:
         models = [model for metadata in result["providers"].values() for model in metadata["resolved_models"]]
         requested_models = [metadata["requested_model"] for metadata in result["providers"].values()]
@@ -762,6 +863,8 @@ def cmd_route(args) -> int:
                 "model": models[0] if len(models) == 1 else None,
                 "requested_model": requested_models[0] if len(requested_models) == 1 else None,
                 "latency_s": latency, "corpus": corpus,
+                "install_scan": {"checked": checked, "roots": [str(root) for root in roots],
+                                 "installed_count": len(installed), "missing": missing},
                 "query_tokens": list(dict.fromkeys(w for w in re.findall(r"[^\W_]+", args.project, re.UNICODE)
                                                      if len(w) >= 2 and not w.isdigit()))[:40]}
         result.update(candidates=cands, degraded=bool(rejected) or result["status"] != "complete", meta=meta)
@@ -796,6 +899,11 @@ def cmd_selftest(args) -> int:
     assert validate_score({**good, "score": 9}, 4)
     assert validate_score({**good, "probabilities": {"0": 0.0, "1": 0.2, "2": 0.2, "3": 0.2}}, 4)
     assert validate_score({"type": "noul", "noul": 0.9}, 4)
+    rows = [{"name": "PDF"}, {"name": "Absent Skill"}]
+    assert annotate_installed(rows, {"pdf": "/x/SKILL.md"}) == ["Absent Skill"], "install detection"
+    assert rows[0]["installed"] and rows[0]["installed_path"] == "/x/SKILL.md"
+    assert not rows[1]["installed"] and rows[1]["installed_path"] is None
+    assert annotate_installed([{"name": "Same"}, {"name": "same"}], {}) == ["Same"], "duplicate names"
     print("selftest: all checks passed")
     return 0
 
@@ -828,6 +936,10 @@ def main() -> int:
     c.add_argument("--jev-model", help="Override JEV_MODEL (default: jev-latest).")
     c.add_argument("--perplexity-model", help="Override PERPLEXITY_DECISION_MODEL (default: pplx-decider-v1.1-27b).")
     c.add_argument("--priority-profile", help="Model-matched accuracy/cost JSON; overrides SKILL_ROUTER_PRIORITY_PROFILE in both mode.")
+    c.add_argument("--installed-root", action="append", metavar="DIR",
+                   help="Where installed skills live; repeatable. Overrides SKILL_ROUTER_INSTALL_ROOTS and the defaults.")
+    c.add_argument("--no-install-check", action="store_true",
+                   help="Skip the local-installation check; ranked rows then carry no [local] marker.")
     c.set_defaults(fn=cmd_route)
     d = sub.add_parser("selftest"); d.add_argument("--sources", default=SOURCES); d.set_defaults(fn=cmd_selftest)
     args = p.parse_args()
