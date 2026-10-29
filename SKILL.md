@@ -87,6 +87,7 @@ Run `terminal` with the repo as working directory:
 ```bash
 python3 router.py stats                       # is the index there, and what's in it
 python3 router.py index                        # rebuild/refresh (~5 min, network)
+python3 router.py index --max-parse-failures 50 # publish despite broken upstream YAML
 python3 router.py route "<project description>" --top 40
 python3 router.py route "<project description>" --provider perplexity
 python3 router.py route "<project description>" --provider both --out ranking.json
@@ -169,6 +170,17 @@ or unreadable tree is ignored, not an error. `--no-install-check` skips the chec
   not block valid recommendations from the other. Report the fallback status and
   error; never fabricate a missing observation. No valid ranking means a nonzero
   CLI exit, with a structured result preserved when `--out` is supplied.
+- **One broken upstream file blocks the whole refresh.** Any discovery, fetch or parse
+  failure preserves the last good snapshot and exits nonzero, so a single malformed
+  `SKILL.md` keeps the index stale until you act. `--max-parse-failures N` publishes anyway
+  and records each file in `index_skips` with reason `parse_failed`; `stats` then lists what
+  the last build skipped, and `index_meta.parse_failures` carries the count. Fetch failures
+  always abort — they mean the network or the API, not a broken author, and a rebuild retries
+  throttling (403/429, resets) four times before giving up.
+- **A rebuild resumes.** Good fetches are flushed to the `fm` cache every 500 rows, so an
+  aborted run does not restart from zero: rerun it and only the missing files are fetched.
+  The failure line reports the reasons and the cached fraction; if you see `http403
+  (throttled)`, wait a minute or lower `--workers` before the next attempt.
 - **The index is a snapshot.** Refresh before decisions that matter. Failed discovery,
   fetch or parsing preserves the last good published data and exits nonzero. Read the
   coverage counts; missing metadata is not the same as a network error.

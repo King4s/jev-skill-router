@@ -178,6 +178,15 @@ flowchart LR
   repository, path and blob SHA**. A changed blob becomes an error again; no blanket waiver.
 - Successful refresh atomically replaces skills, FTS5, sources, caches, skip accounting
   and corpus metadata. Any discovery/fetch/parse failure preserves the last good snapshot.
+  One malformed upstream `SKILL.md` therefore blocks a refresh; `--max-parse-failures N`
+  publishes the rest and records each unparsable file in `index_skips`
+  (`reason = parse_failed`), surfaced by `stats`. Fetch failures always abort.
+
+A rebuild is resumable. Fetched frontmatter is flushed to the `fm` cache every 500 rows, with
+`fetch_cache_meta` recording which parser produced them, so an aborted run keeps everything it
+already fetched and the next run only asks for the rest. That matters at this scale: refetching
+~28,000 blobs restarts the throttling that caused the abort. On failure the CLI prints why
+fetches failed (`http403 (throttled): 9, connection: 7`) and how much of the corpus is cached.
 - Unicode-preserving SHA-256 fingerprints group **normalized metadata**, not full skill
   bodies. Source rows remain available via duplicate pointers; metadata equality does not
   prove equal instructions.

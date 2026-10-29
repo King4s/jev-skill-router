@@ -21,6 +21,7 @@ Needs: PyYAML 6.x; gh (authenticated) for index; TYPESAFE_API_KEY (or
 from __future__ import annotations
 
 import argparse
+import collections
 import concurrent.futures as cf
 import contextlib
 import hashlib
@@ -52,6 +53,8 @@ SOURCES = ROOT / "Skills-list.md"          # maintained by Grok Bot
 JEV_API = "https://api.typesafe.ai/v1/systemone"
 JEV_MODEL = os.environ.get("JEV_MODEL", "jev-latest")
 MAX_FRONTMATTER_BYTES = 65536
+# Why fetches failed in this run, e.g. {'http403 (throttled)': 9, 'connection': 7}.
+FETCH_FAILURES: collections.Counter = collections.Counter()
 MAX_TOP = 300            # client safety ceiling; not a claim about provider limits
 MAX_REQUEST_BYTES = 131072
 PARSER_VERSION = "8"
@@ -237,7 +240,11 @@ def fetch_head(repo: str, branch: str, path: str) -> str | None:
     """Fetch complete frontmatter up to 64 KiB; an incomplete header fails parsing."""
     url = f"https://raw.githubusercontent.com/{repo}/{quote(branch, safe='')}/{quote(path, safe='/')}"
     headers = {"Range": f"bytes=0-{MAX_FRONTMATTER_BYTES-1}", "User-Agent": "jev-skill-router"}
-    for attempt in range(3):
+    # A full rebuild asks raw.githubusercontent for tens of thousands of blobs; it answers
+    # 403/429 and resets connections under that rate. Retry those with bounded backoff and
+    # still fail fast on 404/451, so a deleted or private file is not retried.
+    attempts, cap = 4, 15
+    for attempt in range(attempts):
         try:
             req = urllib.request.Request(url, headers=headers)
             with urllib.request.urlopen(req, timeout=20) as r:
@@ -249,13 +256,15 @@ def fetch_head(repo: str, branch: str, path: str) -> str | None:
             if e.code == 416 and "Range" in headers:
                 headers.pop("Range")
                 continue
-            if e.code not in (429, 500, 502, 503, 529) or attempt == 2:
+            if e.code not in (403, 429, 500, 502, 503, 529) or attempt == attempts - 1:
+                FETCH_FAILURES[f"http{e.code}" + (" (throttled)" if attempt else "")] += 1
                 return None
-            time.sleep(min(2 ** attempt, 8))
+            time.sleep(min(2 ** attempt, cap))
         except (OSError, TimeoutError):
-            if attempt == 2:
+            if attempt == attempts - 1:
+                FETCH_FAILURES["connection"] += 1
                 return None
-            time.sleep(min(2 ** attempt, 8))
+            time.sleep(min(2 ** attempt, cap))
     return None
 
 
@@ -274,6 +283,8 @@ CREATE TABLE IF NOT EXISTS sources (repo TEXT PRIMARY KEY, tier TEXT, branch TEX
 CREATE TABLE IF NOT EXISTS fm (repo TEXT, path TEXT, sha TEXT, name TEXT, desc TEXT, tags TEXT,
   PRIMARY KEY (repo, path));
 CREATE TABLE IF NOT EXISTS index_meta (key TEXT PRIMARY KEY, value TEXT);
+-- Fetch-cache bookkeeping, deliberately outside index_meta: an aborted run may update the cache.
+CREATE TABLE IF NOT EXISTS fetch_cache_meta (key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS index_skips (repo TEXT, path TEXT, sha TEXT, reason TEXT,
   PRIMARY KEY (repo, path));
 """
@@ -288,9 +299,17 @@ def cmd_index(args) -> int:
     # SQLite's own context manager commits but never closes; Windows cannot replace an open file.
     with contextlib.closing(sqlite3.connect(args.db)) as db, db:
         db.executescript(SCHEMA)
-        version = db.execute("SELECT value FROM index_meta WHERE key='parser_version'").fetchone()
+        def meta(key):
+            row = db.execute("SELECT value FROM index_meta WHERE key=?", (key,)).fetchone()
+            return row[0] if row else None
+
+        # The fetch cache carries its own parser version, so an aborted rebuild resumes from the
+        # rows it already fetched instead of restarting from zero.
+        cached_row = db.execute("SELECT value FROM fetch_cache_meta WHERE key='fm_parser_version'").fetchone()
+        cache_version = (cached_row[0] if cached_row else None) or meta("parser_version")
         cache = {(r[0], r[1]): (r[2], r[3], r[4], r[5])
-                 for r in db.execute("SELECT repo,path,sha,name,desc,tags FROM fm")} if version == (PARSER_VERSION,) else {}
+                 for r in db.execute("SELECT repo,path,sha,name,desc,tags FROM fm")} \
+            if cache_version == PARSER_VERSION else {}
         print(f"[index] {len(sources)} sources from {args.sources}", flush=True)
         jobs, source_rows = [], []
         for repo, tier in sources:
@@ -321,6 +340,17 @@ def cmd_index(args) -> int:
 
         coverage = {k: 0 for k in ("cached", "parsed", "missing_metadata", "known_negative_fixture", "fetch_failed", "parse_failed")}
         rows, keep, skips = [], [], []
+        FETCH_FAILURES.clear()
+        pending = []                     # fetched frontmatter, flushed to fm as a cache
+
+        def flush_cache():
+            if not pending:
+                return
+            db.executemany("INSERT OR REPLACE INTO fm(repo,path,sha,name,desc,tags) VALUES(?,?,?,?,?,?)", pending)
+            db.execute("INSERT OR REPLACE INTO fetch_cache_meta(key,value) VALUES('fm_parser_version',?)",
+                       (PARSER_VERSION,))
+            db.commit()                  # a cache flush, not a publication: an aborted run keeps it
+            pending.clear()
         with cf.ThreadPoolExecutor(max_workers=args.workers) as ex:
             for status, result, job in ex.map(pull, jobs):
                 coverage[status] += 1
@@ -330,15 +360,36 @@ def cmd_index(args) -> int:
                         print(f"[index] {status}: {job[0]}/{job[2]}", file=sys.stderr)
                     continue
                 keep.append(result)
+                pending.append(result)
+                if len(pending) >= CACHE_FLUSH_EVERY:
+                    flush_cache()
                 repo, path, sha, name, desc, tags = result
                 _, revision, _, tier, stars, _ = job
                 rows.append((name, desc, tags, tier, repo, stars, path,
                              f"https://github.com/{repo}/blob/{revision}/{quote(path, safe='/')}",
                              fingerprint(name, desc)))
+        flush_cache()                # last flush, before the publication transaction
         print(f"[index] coverage: {json.dumps({'discovered': len(jobs), **coverage}, sort_keys=True)}")
-        if coverage["fetch_failed"] or coverage["parse_failed"]:
+        limit = getattr(args, "max_parse_failures", 0)
+        if limit < 0:
+            raise ValueError("--max-parse-failures must be zero or positive")
+        if coverage["fetch_failed"] or coverage["parse_failed"] > limit:
             print("[index] refresh failed; last published index and cache preserved", file=sys.stderr)
+            if coverage["fetch_failed"]:
+                reasons = ", ".join(f"{reason}: {n}" for reason, n in FETCH_FAILURES.most_common())
+                print(f"[index] fetch failures by reason: {reasons or 'unknown'}", file=sys.stderr)
+                print(f"[index] {coverage['cached'] + coverage['parsed']} of {len(jobs)} files are cached; "
+                      f"rerun to continue from there instead of refetching everything.", file=sys.stderr)
+            if coverage["parse_failed"] and not coverage["fetch_failed"]:
+                print(f"[index] {coverage['parse_failed']} SKILL.md file(s) failed YAML parsing "
+                      f"(limit {limit}). Fix or exclude the sources, or rerun with "
+                      f"--max-parse-failures N to publish an index that records them in index_skips.",
+                      file=sys.stderr)
             return 1
+        if coverage["parse_failed"]:
+            print(f"[index] publishing with {coverage['parse_failed']} unparsable SKILL.md file(s) "
+                  f"recorded in index_skips (limit {limit}); fetch failures always abort.",
+                  file=sys.stderr)
 
         # Fetches are complete before publication. One transaction replaces all derived rows.
         db.execute("BEGIN IMMEDIATE")
@@ -346,6 +397,8 @@ def cmd_index(args) -> int:
             db.execute(f"DELETE FROM {table}")
         db.executemany("INSERT INTO sources(repo,tier,branch,stars,listed,truncated,note) VALUES(?,?,?,?,?,?,?)", source_rows)
         db.executemany("INSERT INTO fm(repo,path,sha,name,desc,tags) VALUES(?,?,?,?,?,?)", keep)
+        db.execute("INSERT OR REPLACE INTO fetch_cache_meta(key,value) VALUES('fm_parser_version',?)",
+                   (PARSER_VERSION,))
         db.executemany("INSERT INTO index_skips(repo,path,sha,reason) VALUES(?,?,?,?)", skips)
         seen = {}
         for row in rows:
@@ -359,6 +412,7 @@ def cmd_index(args) -> int:
                            (cur.lastrowid, row[0], row[1], row[2]))
         identity = hashlib.sha256(json.dumps(sorted(rows), ensure_ascii=False).encode()).hexdigest()
         metadata = {"parser_version": PARSER_VERSION, "identity": identity,
+                    "parse_failures": str(coverage["parse_failed"]),
                     "created_at": datetime.now(timezone.utc).isoformat(),
                     "coverage": json.dumps({'discovered': len(jobs), **coverage})}
         db.executemany("INSERT OR REPLACE INTO index_meta(key,value) VALUES(?,?)", metadata.items())
@@ -380,6 +434,14 @@ def cmd_stats(args) -> int:
     for repo, n in q("SELECT repo, COUNT(*) FROM skills WHERE dup_of IS NULL "
                      "GROUP BY repo ORDER BY 2 DESC LIMIT 10"):
         print(f"  {n:6d}  {repo}")
+    try:
+        skipped = q("SELECT reason, COUNT(*) FROM index_skips GROUP BY reason ORDER BY 2 DESC").fetchall()
+    except sqlite3.Error:
+        skipped = []
+    if skipped:
+        print("\nskipped by the last build:")
+        for reason, n in skipped:
+            print(f"  {n:6d}  {reason}")
     print("\nsources with no SKILL.md (link lists, phase 2):")
     for repo, note in q("SELECT repo, note FROM sources WHERE listed=0 ORDER BY repo"):
         print(f"    {repo}  ({note})")
@@ -709,6 +771,7 @@ def score_candidates(project: str, cands: list[dict], provider: str = "jev",
 
 MAX_INSTALL_DIRS = 5000    # bounded scan: a runaway tree must not stall a route
 # Two layouts count as installed: skills/<name>/SKILL.md and skills/<group>/<name>/SKILL.md.
+CACHE_FLUSH_EVERY = 500      # rows per cache flush; a crash resumes from here
 MAX_NESTED_PER_ENTRY = 500 # a category with more children than this is not a skill tree
 
 
@@ -926,7 +989,10 @@ def main() -> int:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = p.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("sources"); s.add_argument("--sources", default=SOURCES); s.set_defaults(fn=cmd_sources)
-    a = sub.add_parser("index"); a.add_argument("--db", default=DB); a.add_argument("--sources", default=SOURCES); a.add_argument("--workers", type=int, default=16); a.set_defaults(fn=cmd_index)
+    a = sub.add_parser("index"); a.add_argument("--db", default=DB); a.add_argument("--sources", default=SOURCES); a.add_argument("--workers", type=int, default=16)
+    a.add_argument("--max-parse-failures", type=int, default=0, metavar="N",
+                   help="Publish even when up to N SKILL.md files fail YAML parsing; they are recorded in index_skips. Fetch failures always abort (default: 0).")
+    a.set_defaults(fn=cmd_index)
     b = sub.add_parser("stats"); b.add_argument("--db", default=DB); b.set_defaults(fn=cmd_stats)
     c = sub.add_parser("route")
     c.add_argument("project")
