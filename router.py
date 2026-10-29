@@ -197,8 +197,10 @@ def cmd_sources(args) -> int:
 
 
 def gh_api(path: str):
+    # Pin UTF-8: Windows would otherwise decode gh's JSON with the legacy code page and
+    # crash on any non-ASCII SKILL.md path.
     r = subprocess.run(["gh", "api", "-H", "Accept: application/vnd.github+json", path],
-                       capture_output=True, text=True, timeout=60)
+                       capture_output=True, text=True, encoding="utf-8", timeout=60)
     if r.returncode != 0:
         raise RuntimeError(f"GitHub lookup failed: {path}: {r.stderr.strip()[:200]}")
     try:

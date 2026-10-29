@@ -22,6 +22,9 @@
 
 ### Fixed
 
+- Read `gh api` output as UTF-8. Windows decoded it with the legacy code page and raised
+  `UnicodeDecodeError` for any repository with a non-ASCII `SKILL.md` path, aborting the
+  refresh. Covered by an offline regression test.
 - Close SQLite connections after use. SQLite's own context manager commits but never
   closes, so the index file stayed locked: on Windows `index` could not replace it and the
   offline suite failed teardown with `WinError 32`. The suite is now green on Windows as
