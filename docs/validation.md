@@ -100,3 +100,31 @@ Windows Python 3.11.16 as well.
 
 No paid provider request was made for this change: routing output is exercised with a
 patched scorer, so the new flags and markers are verified without inference spend.
+
+## Windows suite cleanup (2026-10-29)
+
+The offline suite failed on Windows with 5 failures and 24 errors that were environmental,
+not behavioural. Both causes are fixed at the source rather than suppressed:
+
+- **Unclosed SQLite handles.** `with sqlite3.connect(path) as db:` commits at block exit but
+  never closes the connection, so `skills.db` stayed locked and `TemporaryDirectory` cleanup
+  raised `PermissionError: [WinError 32]`. `cmd_index`, the selftest fixture, the test suite
+  and the three smoke scripts now use `contextlib.closing(...)` around the connection while
+  keeping the commit/rollback context manager.
+- **Ambient provider settings.** The shell in this environment exports `SKILL_ROUTER_PROVIDER`
+  and `TYPESAFE_API_KEY`, so tests that do not pass `--provider` exercised a different code
+  path, produced a real model name in artifacts and returned exit 0 where the contract
+  requires 1. The test cases now clear `SKILL_ROUTER_*`, `JEV_*`, `PERPLEXITY_*` and
+  `TYPESAFE_*` for their duration and restore them afterwards.
+
+Result on the same machine, Windows 11 / Python 3.11.16, with the ambient variables present:
+
+- `python -m unittest test_router`: **35 tests pass**.
+- `python -m unittest discover -s tests`: **79 tests pass**.
+- `python router.py selftest`: `all checks passed`.
+- `python -m py_compile router.py test_router.py scripts/*.py`: clean.
+
+The `ignore_cleanup_errors=True` workaround added earlier to the new test class was removed
+once the handles were closed, so a future leak fails the suite instead of being hidden.
+Linux (WSL, Python 3.12.3) still reports 35 + 79 passing tests and a clean selftest.
+

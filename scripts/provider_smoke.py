@@ -129,7 +129,7 @@ def native(binary, cwd, env, stdio=False):
 
 
 def seed(path):
-    with sqlite3.connect(path) as db:
+    with contextlib.closing(sqlite3.connect(path)) as db, db:
         db.executescript(router.SCHEMA)
         for i in range(1, 301):
             name, desc = f'test-skill-{i:03}', 'Read PDF files'
@@ -330,7 +330,7 @@ def run(binary, switching_only=False):
             candidates = decode_tool(tool('skills_search', {'query': 'PDF', 'top': 129}))['candidates']
             last_id = candidates[-1]['id']
             long_desc = 'Read PDF files ' + 'x' * 140000
-            with sqlite3.connect(dbpath) as db:
+            with contextlib.closing(sqlite3.connect(dbpath)) as db, db:
                 db.execute('UPDATE skills SET desc=? WHERE id=?', (long_desc, last_id))
                 db.execute('UPDATE skills_fts SET desc=? WHERE rowid=?', (long_desc, last_id))
             candidates = decode_tool(tool('skills_search', {'query': 'PDF', 'top': 300}))['candidates']

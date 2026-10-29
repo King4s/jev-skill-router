@@ -19,6 +19,20 @@ import decision_providers
 import router
 
 
+def isolate_environment(testcase):
+    """Remove ambient provider/model settings so a shell cannot change what a test exercises."""
+    ambient = {key: os.environ.pop(key) for key in list(os.environ)
+               if key.startswith(('SKILL_ROUTER_', 'JEV_', 'PERPLEXITY_', 'TYPESAFE_'))}
+    testcase.addCleanup(lambda: os.environ.update(ambient))
+
+
+@contextlib.contextmanager
+def open_db(path):
+    """SQLite's own context manager commits but never closes; Windows needs the close."""
+    with contextlib.closing(sqlite3.connect(path)) as db, db:
+        yield db
+
+
 def load_script(name):
     spec = importlib.util.spec_from_file_location(name, router.ROOT / 'scripts' / (name + '.py'))
     assert spec is not None and spec.loader is not None
@@ -68,6 +82,7 @@ class ReviewChecks(unittest.TestCase):
             self.assertNotIn('Verified native deployment', output.call_args.args[0])
 
     def setUp(self):
+        isolate_environment(self)
         self.tmp = tempfile.TemporaryDirectory(dir=os.environ.get('TMPDIR'))
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
@@ -75,7 +90,7 @@ class ReviewChecks(unittest.TestCase):
         self.sources = self.root / 'sources.txt'
         self.sources.write_text('example/repo\n')
         self.index_args = SimpleNamespace(db=str(self.path), sources=str(self.sources), workers=1)
-        with sqlite3.connect(self.path) as db:
+        with open_db(self.path) as db:
             db.executescript(router.SCHEMA)
             for i in (1, 2):
                 db.execute('INSERT INTO skills(id,name,desc,tags,tier,repo,path,url,fp) VALUES(?,?,?,?,?,?,?,?,?)',
@@ -90,7 +105,7 @@ class ReviewChecks(unittest.TestCase):
         self.addCleanup(self.redirect.__exit__, None, None, None)
 
     def snapshot(self):
-        with sqlite3.connect(self.path) as db:
+        with open_db(self.path) as db:
             return {table: db.execute('SELECT * FROM '+table).fetchall()
                     for table in ('skills', 'skills_fts', 'fm', 'sources', 'index_meta', 'index_skips')}
 
@@ -177,13 +192,13 @@ class ReviewChecks(unittest.TestCase):
         with patch.object(router, 'list_skill_paths', return_value=('main', [('SKILL.md', 'new-sha')], 1)), \
              patch.object(router, 'fetch_head', return_value='---\nname: new\ndescription: Read PDFs\n---\n'):
             self.assertEqual(router.cmd_index(self.index_args), 0)
-        with sqlite3.connect(self.path) as db:
+        with open_db(self.path) as db:
             self.assertEqual(db.execute('SELECT name FROM skills').fetchall(), [('new',)])
             self.assertEqual(db.execute('SELECT name FROM skills_fts').fetchall(), [('new',)])
             self.assertEqual(db.execute('SELECT sha FROM fm').fetchall(), [('new-sha',)])
 
     def test_publish_error_rolls_back_all_derived_rows(self):
-        with sqlite3.connect(self.path) as db:
+        with open_db(self.path) as db:
             db.execute("CREATE TRIGGER fail_publish BEFORE INSERT ON skills WHEN NEW.name='new' BEGIN SELECT RAISE(ABORT,'offline publication failure'); END")
         before = self.snapshot()
         with patch.object(router, 'list_skill_paths', return_value=('main', [('SKILL.md', 'new-sha')], 1)), \
@@ -299,7 +314,7 @@ class ReviewChecks(unittest.TestCase):
         with patch.object(router, 'list_skill_paths', return_value=('main', [('SKILL.md', 'new-sha')], 1)), \
              patch.object(router, 'fetch_head', return_value='---\nname: missing-description\n---\n'):
             self.assertEqual(router.cmd_index(self.index_args), 0)
-        with sqlite3.connect(self.path) as db:
+        with open_db(self.path) as db:
             coverage = json.loads(db.execute("SELECT value FROM index_meta WHERE key='coverage'").fetchone()[0])
             self.assertEqual(coverage['discovered'], 1)
             self.assertEqual(coverage['missing_metadata'], 1)
@@ -424,7 +439,7 @@ class ReviewChecks(unittest.TestCase):
             with patch.object(router, 'list_skill_paths', return_value=('revision', [(path, blob)], 0)), \
                  patch.object(router, 'fetch_head', return_value='---\nname: invalid\n'):
                 self.assertEqual(router.cmd_index(self.index_args), expected)
-        with sqlite3.connect(self.path) as db:
+        with open_db(self.path) as db:
             reason = db.execute('SELECT reason FROM index_skips WHERE path=?', (path,)).fetchone()[0]
             self.assertEqual(reason, 'known_negative_fixture')
 
@@ -478,12 +493,12 @@ class InstallAwareness(unittest.TestCase):
     """A recommended skill that is not installed is flagged, and the run asks about it."""
 
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(dir=os.environ.get('TMPDIR'),
-                                               ignore_cleanup_errors=True)
+        isolate_environment(self)
+        self.tmp = tempfile.TemporaryDirectory(dir=os.environ.get('TMPDIR'))
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
         self.path = self.root / 'skills.db'
-        with sqlite3.connect(self.path) as db:
+        with open_db(self.path) as db:
             db.executescript(router.SCHEMA)
             for i, name in ((1, 'pdf'), (2, 'mystery-skill')):
                 db.execute('INSERT INTO skills(id,name,desc,tags,tier,repo,path,url,fp) VALUES(?,?,?,?,?,?,?,?,?)',
