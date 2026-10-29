@@ -149,3 +149,38 @@ behaviour and passes on the fix, on any platform.
 Counts after this change: `test_router` **36 tests pass**, `discover -s tests` **79 pass**,
 `selftest` clean, on Windows 11 / Python 3.11.16 and on Linux (WSL, Python 3.12.3).
 
+## Index refresh on real data (2026-10-29)
+
+Three full runs over the 108-source list, on this machine, with the pinned `.venv`:
+
+| Attempt | Result |
+|---|---|
+| 1 | `discovered 28510 / parsed 28345 / parse_failed 37 / fetch_failed 0` → aborted (37 upstream files with invalid YAML) |
+| 2 | `parsed 28336 / parse_failed 37 / fetch_failed 9` → aborted (strict fetch policy) |
+| 3 | `parsed 28329 / parse_failed 37 / fetch_failed 16` → aborted, now with 403 retries and four attempts |
+
+What the failures were not:
+
+- Not dead links. The failing path returned `HTTP 206, 2291 bytes` on demand, and GitHub quota
+  read 4,118 of 5,000 remaining.
+- Not path-specific. Indexing the repo that produced all nine failures on its own gave
+  `5758 discovered / 5758 parsed / 0 fetch_failed / 0 parse_failed`.
+- Not our parser, for the 37: the file indents a mapping under a sequence item
+  (`dependencies:\n- shared/x\n  triggers:`), which is invalid YAML.
+
+So the failures are `raw.githubusercontent.com` throttling a first rebuild that asks for ~28,500
+blobs in ten minutes — and with fail-closed publishing plus a non-resumable cache, every attempt
+paid that cost again. Three changes follow from the evidence:
+
+- `--max-parse-failures N` publishes past broken upstream YAML, recording each file
+  (`index_skips`, reason `parse_failed`) and the count (`index_meta.parse_failures`).
+- Fetches retry 403 as well as 429/5xx and resets, four attempts, backoff capped at 15 s;
+  404/451 fail immediately.
+- A rebuild resumes: good fetches are flushed to `fm` every 500 rows with
+  `fetch_cache_meta.fm_parser_version`, and an abort reports the failure reasons and the cached
+  fraction, so the next run only requests what is missing.
+
+Verified offline (`test_router` 45 tests, `discover -s tests` 79, `selftest`) on Windows 11 /
+Python 3.11.16 and Linux (WSL, Python 3.12.3). The published snapshot for this machine is
+recorded below once the resumed run completes.
+

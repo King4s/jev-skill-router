@@ -177,6 +177,10 @@ or unreadable tree is ignored, not an error. `--no-install-check` skips the chec
   the last build skipped, and `index_meta.parse_failures` carries the count. Fetch failures
   always abort — they mean the network or the API, not a broken author, and a rebuild retries
   throttling (403/429, resets) four times before giving up.
+- **A rebuild resumes.** Good fetches are flushed to the `fm` cache every 500 rows, so an
+  aborted run does not restart from zero: rerun it and only the missing files are fetched.
+  The failure line reports the reasons and the cached fraction; if you see `http403
+  (throttled)`, wait a minute or lower `--workers` before the next attempt.
 - **The index is a snapshot.** Refresh before decisions that matter. Failed discovery,
   fetch or parsing preserves the last good published data and exits nonzero. Read the
   coverage counts; missing metadata is not the same as a network error.

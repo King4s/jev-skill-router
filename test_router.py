@@ -106,9 +106,14 @@ class ReviewChecks(unittest.TestCase):
         self.addCleanup(self.redirect.__exit__, None, None, None)
 
     def snapshot(self):
+        """Published rows only. `fm` is a fetch cache and may grow during a failed run."""
         with open_db(self.path) as db:
             return {table: db.execute('SELECT * FROM '+table).fetchall()
-                    for table in ('skills', 'skills_fts', 'fm', 'sources', 'index_meta', 'index_skips')}
+                    for table in ('skills', 'skills_fts', 'sources', 'index_meta', 'index_skips')}
+
+    def cache_rows(self):
+        with open_db(self.path) as db:
+            return sorted(db.execute('SELECT repo, path, sha FROM fm').fetchall())
 
     def route(self, response, top=40):
         out = self.root / 'route.json'
@@ -243,6 +248,53 @@ class ReviewChecks(unittest.TestCase):
              patch.object(router.time, 'sleep', lambda seconds: None):
             self.assertIsNone(router.fetch_head('example/repo', 'main', 'gone/SKILL.md'))
         self.assertEqual(len(calls), 1)
+
+    def test_aborted_run_keeps_the_fetch_cache_and_a_rerun_resumes(self):
+        """28k good fetches must survive an abort; the rerun only asks for the rest."""
+        pages = {'good/SKILL.md': '---\nname: good\ndescription: Read PDFs\n---\n',
+                 'bad/SKILL.md': '---\nname: bad\ndescription: Read PDFs\n---\n'}
+        paths = [('good/SKILL.md', 'sha-good'), ('bad/SKILL.md', 'sha-bad')]
+
+        def first_fetch(repo, revision, path):
+            return pages[path] if path.startswith('good') else None
+
+        published = self.snapshot()
+        with patch.object(router, 'list_skill_paths', return_value=('main', paths, 1)), \
+             patch.object(router, 'fetch_head', side_effect=first_fetch):
+            self.assertEqual(router.cmd_index(self.index_args), 1)
+        self.assertEqual(self.snapshot(), published)
+        self.assertEqual(self.cache_rows(), [('example/repo', 'SKILL.md', 'old-sha'),
+                                             ('example/repo', 'good/SKILL.md', 'sha-good')])
+
+        def second_fetch(repo, revision, path):
+            self.assertEqual(path, 'bad/SKILL.md', 'a cached file was fetched again')
+            return pages[path]
+
+        with patch.object(router, 'list_skill_paths', return_value=('main', paths, 1)), \
+             patch.object(router, 'fetch_head', side_effect=second_fetch):
+            self.assertEqual(router.cmd_index(self.index_args), 0)
+        with open_db(self.path) as db:
+            self.assertEqual(sorted(row[0] for row in db.execute('SELECT name FROM skills')),
+                             ['bad', 'good'])
+
+    def test_fetch_failure_reasons_are_reported(self):
+        err = io.StringIO()
+        with patch.object(router, 'list_skill_paths', return_value=('main', [('SKILL.md', 'sha-1')], 1)), \
+             patch.object(router.urllib.request, 'urlopen',
+                          side_effect=HTTPError('u', 404, 'Not Found', {}, None)), \
+             contextlib.redirect_stderr(err):
+            self.assertEqual(router.cmd_index(self.index_args), 1)
+        self.assertIn('http404: 1', err.getvalue())
+        self.assertIn('cached; rerun to continue from there', err.getvalue())
+
+    def test_throttled_fetch_is_reported_distinctly_from_a_missing_file(self):
+        router.FETCH_FAILURES.clear()
+        self.addCleanup(router.FETCH_FAILURES.clear)
+        with patch.object(router.urllib.request, 'urlopen',
+                          side_effect=HTTPError('u', 403, 'Forbidden', {}, None)), \
+             patch.object(router.time, 'sleep', lambda seconds: None):
+            self.assertIsNone(router.fetch_head('example/repo', 'main', 'SKILL.md'))
+        self.assertEqual(dict(router.FETCH_FAILURES), {'http403 (throttled)': 1})
 
     def test_tolerated_parse_failures_publish_and_are_recorded(self):
         """An explicit limit publishes the rest and keeps the unparsable file on record."""

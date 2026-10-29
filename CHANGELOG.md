@@ -36,6 +36,10 @@
 - Read `gh api` output as UTF-8. Windows decoded it with the legacy code page and raised
   `UnicodeDecodeError` for any repository with a non-ASCII `SKILL.md` path, aborting the
   refresh. Covered by an offline regression test.
+- Resume a rebuild. Fetched frontmatter is now flushed to the `fm` cache every 500 rows
+  (versioned in `fetch_cache_meta`), so an interrupted or throttled `index` continues from
+  where it stopped instead of refetching the whole corpus. An aborted run reports the fetch
+  failure reasons (`http403 (throttled)`, `connection`, ...) and the cached fraction.
 - Retry a throttled blob fetch. A full rebuild asks `raw.githubusercontent.com` for tens of
   thousands of files and it answers 403/429 or resets connections under that rate, which
   aborted the refresh through the strict fetch policy. 403/429 and connection errors are now
