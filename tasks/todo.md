@@ -19,3 +19,9 @@
 - [x] Flag recommendations that are not installed locally and ask the user about them
       instead of reporting an unavailable skill and continuing.
 - [x] Cover both skill-tree layouts, file/missing roots and `--no-install-check` offline.
+- [x] Close SQLite handles after use and isolate the suite from ambient provider settings;
+      the offline suite passes on Windows and Linux.
+- [x] Decode `gh api` output as UTF-8, with an offline regression test.
+- [x] Document that the native server and `jev-skill-refresh` are Unix-only.
+- [x] Sync the installed copy at `~/.agents/skills/jev-skill-router` to `main`, with a
+      project `.venv` pinning PyYAML.
