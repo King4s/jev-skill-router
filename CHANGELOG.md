@@ -4,6 +4,11 @@
 
 ### Added
 
+- `route` marks every ranked skill `[installed]` or `[not installed]` from the local
+  skill trees, prints an `[install]` line naming the missing recommendations, and
+  records `meta.install_scan` in `--out`. The skill instructions now require asking the
+  user whether to install a suggested but absent skill instead of reporting it
+  unavailable and continuing. Native MCP output and behaviour are unchanged.
 - Choose Jev, Perplexity Decisions, or both when recommending skills. Jev remains
   the default, and each provider keeps its own credentials and model selection.
 - Ordered failover in `both`: higher measured accuracy is preferred, with lower

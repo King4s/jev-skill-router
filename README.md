@@ -20,7 +20,8 @@
 A native Rust MCP server that recommends third-party agent skills for a project.
 It retrieves deduplicated metadata with SQLite FTS5/BM25, then sends **one comparable
 typed Score per candidate**, in batches of at most 128 questions, to one configured
-provider. It never installs or executes skills.
+provider. It never installs or executes skills; the Python `route` command only
+marks which recommendations are already installed on the machine.
 
 The Python indexer (with PyYAML) and evaluation scripts are **offline tooling**.
 The Rust service opens SQLite read-only and calls the selected provider directly: no Python wrapper,
@@ -311,6 +312,23 @@ Only the selected providers receive requests. Explicit `jev` and `perplexity`
 selections require the chosen provider and never switch services. In `both`, only
 the provider currently needed receives the task and candidate metadata; a missing
 or invalid key/model is reported without blocking use of the other.
+
+## Local installation check
+
+The Python `route` command marks every ranked skill `[installed]` or `[not installed]` and
+prints an `[install]` line naming the recommendations this machine does not have. That is
+the signal for the agent to ask the user whether to install a suggested skill — the router
+never installs anything itself. A recommendation that is absent from this machine is *not*
+an unavailable service, so it must not end with a silent "not available, continuing".
+
+Sources: `--installed-root DIR` (repeatable) or `SKILL_ROUTER_INSTALL_ROOTS`, otherwise
+`~/.agents/skills`, `~/.hermes/skills`, the Hermes profile `skills/` trees,
+`~/.claude/skills` and `~/.codex/skills`. `--no-install-check` skips the scan.
+`--out` records `meta.install_scan` (`checked`, `roots`, `installed_count`, `missing`)
+and per-row `installed` / `installed_path`. The scan reads directory names and
+`SKILL.md` presence only, covers `skills/<name>/` and `skills/<group>/<name>/`, is
+bounded, and ignores missing or unreadable trees. The native MCP surface reports no
+installation status; this check is Python-only.
 
 Perplexity uses the official [Decisions API](https://docs.perplexity.ai/docs/decisions/quickstart),
 not its search/chat endpoint. The adapter uses Python's standard library, with no

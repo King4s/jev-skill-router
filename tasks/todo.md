@@ -16,3 +16,6 @@
 - [x] Prefer higher measured accuracy, using measured cost to break exact ties.
 - [x] Call the standby only for unresolved candidates, preserving valid preferred answers.
 - [x] Verify priority profiles and a live preferred-only request with no standby calls.
+- [x] Flag recommendations that are not installed locally and ask the user about them
+      instead of reporting an unavailable skill and continuing.
+- [x] Cover both skill-tree layouts, file/missing roots and `--no-install-check` offline.
