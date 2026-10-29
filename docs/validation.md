@@ -92,11 +92,11 @@ unchanged, so nothing here claims installation status for MCP clients.
   annotation.
 - On this machine the default roots resolve 110 installed skills from `~/.agents/skills`.
 
-Run under WSL Ubuntu (Python 3.12.3, PyYAML 6.0.1) because the Windows host run of the
-legacy suite fails on pre-existing `TemporaryDirectory` cleanup (`WinError 32`, an open
-`skills.db`) and two CLI artefact tests; those failures predate this change and are not
-attributed to it. The new tests pass on both interpreters, and `selftest` passes on
-Windows Python 3.11.16 as well.
+Measured under WSL Ubuntu (Python 3.12.3, PyYAML 6.0.1). The Windows run of the legacy suite
+failed at that time on `TemporaryDirectory` cleanup (`WinError 32`, an open `skills.db`) and
+two CLI artefact tests; both causes were traced and fixed later the same day — see "Windows
+suite cleanup" below, which describes the current state. `selftest` passed on Windows Python
+3.11.16 at the time of this measurement.
 
 No paid provider request was made for this change: routing output is exercised with a
 patched scorer, so the new flags and markers are verified without inference spend.
@@ -119,13 +119,23 @@ not behavioural. Both causes are fixed at the source rather than suppressed:
 
 Result on the same machine, Windows 11 / Python 3.11.16, with the ambient variables present:
 
-- `python -m unittest test_router`: **35 tests pass**.
+- `python -m unittest test_router`: **35 tests pass** (35 at this point; the UTF-8 regression
+  test recorded below makes 36).
 - `python -m unittest discover -s tests`: **79 tests pass**.
 - `python router.py selftest`: `all checks passed`.
 - `python -m py_compile router.py test_router.py scripts/*.py`: clean.
 
 The `ignore_cleanup_errors=True` workaround added earlier to the new test class was removed
 once the handles were closed, so a future leak fails the suite instead of being hidden.
+
+Functional checks on the same Windows host, with the inherited `PYTHONPATH` cleared:
+
+- `router.py stats` reads the live 26,013-row index (15,544 unique).
+- `router.py index --sources <2 repos> --db <temp>` completes: 21 discovered, 21 parsed,
+  0 fetch/parse failures — the path the UTF-8 fix unblocked.
+- A real `router.gh_api("repos/King4s/jev-skill-router")` call returns the repository object,
+  so the subprocess decode works against live GitHub, not only the fixture.
+- `scripts/eval_shortlist.py --help` and `scripts/rapport.py --help` start cleanly.
 Linux (WSL, Python 3.12.3) still reports 35 + 79 passing tests and a clean selftest.
 
 ### GitHub JSON encoding (2026-10-29)
