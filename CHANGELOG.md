@@ -20,6 +20,12 @@
 - Offline provider/routing tests and an optional, disabled-by-default Mefi Studio
   integration plan. The MCP adapter and Studio workflow remain planned work.
 
+### Documentation
+
+- State that the native server and `jev-skill-refresh` are Unix-only. `cargo build` fails
+  on Windows (`tokio::signal::unix` in `src/main.rs`, Linux paths in the refresh utility);
+  the Python CLI is the supported entry point there.
+
 ### Fixed
 
 - Read `gh api` output as UTF-8. Windows decoded it with the legacy code page and raised
