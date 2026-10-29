@@ -62,7 +62,7 @@ def decode(reply):
 
 
 def seed(path):
-    with sqlite3.connect(path) as db:
+    with contextlib.closing(sqlite3.connect(path)) as db, db:
         db.executescript("""
             CREATE TABLE skills(id INTEGER PRIMARY KEY,name TEXT,desc TEXT,repo TEXT,
                                 path TEXT,url TEXT,tier TEXT,dup_of INTEGER,revision TEXT);

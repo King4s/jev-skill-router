@@ -22,6 +22,12 @@
 
 ### Fixed
 
+- Close SQLite connections after use. SQLite's own context manager commits but never
+  closes, so the index file stayed locked: on Windows `index` could not replace it and the
+  offline suite failed teardown with `WinError 32`. The suite is now green on Windows as
+  well as Linux.
+- Isolate the tests from ambient `SKILL_ROUTER_*`, `JEV_*`, `PERPLEXITY_*` and `TYPESAFE_*`
+  settings. A shell-selected provider or model no longer changes what a test exercises.
 - In `both` mode, automatically use the other provider when one is unavailable
   or errors. Call it only for unresolved candidates; a healthy preferred provider
   causes no additional provider call. Request retries are disabled in `both`.

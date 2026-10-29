@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures as cf
+import contextlib
 import hashlib
 import json
 import math
@@ -282,7 +283,8 @@ def cmd_index(args) -> int:
     sources = read_sources(Path(args.sources))
     if not sources:
         raise ValueError("No sources: refusing an accidental empty rebuild")
-    with sqlite3.connect(args.db) as db:
+    # SQLite's own context manager commits but never closes; Windows cannot replace an open file.
+    with contextlib.closing(sqlite3.connect(args.db)) as db, db:
         db.executescript(SCHEMA)
         version = db.execute("SELECT value FROM index_meta WHERE key='parser_version'").fetchone()
         cache = {(r[0], r[1]): (r[2], r[3], r[4], r[5])
@@ -885,12 +887,12 @@ def cmd_selftest(args) -> int:
     assert fingerprint("pdf", "Read PDFs.") != fingerprint("pdf", "Write PDFs.")
     assert read_sources(Path(args.sources))[:1] == [("anthropics/skills", "vendor")], "tier parsing"
 
-    db = sqlite3.connect(":memory:")
-    db.executescript(SCHEMA)
-    db.execute("INSERT INTO skills(id,name,desc,tags,tier,repo) VALUES(1,'pdf','Read and merge PDF files','docs','vendor','x/y')")
-    db.execute("INSERT INTO skills_fts(rowid,name,desc,tags) VALUES(1,'pdf','Read and merge PDF files','docs')")
-    hit = shortlist(db, "merge PDF files", 5)
-    assert [h["name"] for h in hit] == ["pdf"], f"FTS prefilter fails: {hit}"
+    with contextlib.closing(sqlite3.connect(":memory:")) as db, db:
+        db.executescript(SCHEMA)
+        db.execute("INSERT INTO skills(id,name,desc,tags,tier,repo) VALUES(1,'pdf','Read and merge PDF files','docs','vendor','x/y')")
+        db.execute("INSERT INTO skills_fts(rowid,name,desc,tags) VALUES(1,'pdf','Read and merge PDF files','docs')")
+        hit = shortlist(db, "merge PDF files", 5)
+        assert [h["name"] for h in hit] == ["pdf"], f"FTS prefilter fails: {hit}"
 
     good = {"type": "score", "score": 2.4, "confidence": 0.7,
             "probabilities": {"0": 0.0, "1": 0.1, "2": 0.4, "3": 0.5}}

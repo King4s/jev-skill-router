@@ -175,7 +175,7 @@ def wire_checks(client):
 def offline(binary):
     with tempfile.TemporaryDirectory(dir=os.environ.get('TMPDIR')) as tmp:
         dbpath = Path(tmp) / 'skills.db'
-        with sqlite3.connect(dbpath) as db:
+        with contextlib.closing(sqlite3.connect(dbpath)) as db, db:
             db.executescript(router.SCHEMA)
             for i in (1, 2):
                 db.execute('INSERT INTO skills(id,name,desc,tags,tier,repo,url) VALUES(?,?,?,?,?,?,?)',
@@ -237,7 +237,7 @@ def offline(binary):
                 for pending in held:
                     assert len(decode_tool(pending.result(timeout=10))['ranked']) == 2
             Provider.mode, Provider.calls = 'good', 0
-            with sqlite3.connect(dbpath) as db:
+            with contextlib.closing(sqlite3.connect(dbpath)) as db, db:
                 long_description = 'Read PDF files ' + 'x' * 65400
                 db.execute('UPDATE skills SET desc=?', (long_description,))
                 db.execute('UPDATE skills_fts SET desc=?', (long_description,))
