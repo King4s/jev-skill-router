@@ -4,6 +4,11 @@
 
 ### Added
 
+- `index --max-parse-failures N` publishes an index when up to N upstream `SKILL.md` files
+  fail YAML parsing, recording each one in `index_skips` with reason `parse_failed`. The
+  default stays strict (0) and fetch failures always abort, so a network problem can never
+  be published as a smaller corpus. `stats` lists what the last build skipped, and
+  `index_meta.parse_failures` records the count.
 - `route` marks every ranked skill `[installed]` or `[not installed]` from the local
   skill trees, prints an `[install]` line naming the missing recommendations, and
   records `meta.install_scan` in `--out`. The skill instructions now require asking the
@@ -31,6 +36,10 @@
 - Read `gh api` output as UTF-8. Windows decoded it with the legacy code page and raised
   `UnicodeDecodeError` for any repository with a non-ASCII `SKILL.md` path, aborting the
   refresh. Covered by an offline regression test.
+- Retry a throttled blob fetch. A full rebuild asks `raw.githubusercontent.com` for tens of
+  thousands of files and it answers 403/429 or resets connections under that rate, which
+  aborted the refresh through the strict fetch policy. 403/429 and connection errors are now
+  retried four times with bounded backoff; 404/451 still fail immediately.
 - Close SQLite connections after use. SQLite's own context manager commits but never
   closes, so the index file stayed locked: on Windows `index` could not replace it and the
   offline suite failed teardown with `WinError 32`. The suite is now green on Windows as

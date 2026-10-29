@@ -237,7 +237,11 @@ def fetch_head(repo: str, branch: str, path: str) -> str | None:
     """Fetch complete frontmatter up to 64 KiB; an incomplete header fails parsing."""
     url = f"https://raw.githubusercontent.com/{repo}/{quote(branch, safe='')}/{quote(path, safe='/')}"
     headers = {"Range": f"bytes=0-{MAX_FRONTMATTER_BYTES-1}", "User-Agent": "jev-skill-router"}
-    for attempt in range(3):
+    # A full rebuild asks raw.githubusercontent for tens of thousands of blobs; it answers
+    # 403/429 and resets connections under that rate. Retry those with bounded backoff and
+    # still fail fast on 404/451, so a deleted or private file is not retried.
+    attempts, cap = 4, 15
+    for attempt in range(attempts):
         try:
             req = urllib.request.Request(url, headers=headers)
             with urllib.request.urlopen(req, timeout=20) as r:
@@ -249,13 +253,13 @@ def fetch_head(repo: str, branch: str, path: str) -> str | None:
             if e.code == 416 and "Range" in headers:
                 headers.pop("Range")
                 continue
-            if e.code not in (429, 500, 502, 503, 529) or attempt == 2:
+            if e.code not in (403, 429, 500, 502, 503, 529) or attempt == attempts - 1:
                 return None
-            time.sleep(min(2 ** attempt, 8))
+            time.sleep(min(2 ** attempt, cap))
         except (OSError, TimeoutError):
-            if attempt == 2:
+            if attempt == attempts - 1:
                 return None
-            time.sleep(min(2 ** attempt, 8))
+            time.sleep(min(2 ** attempt, cap))
     return None
 
 
@@ -336,9 +340,21 @@ def cmd_index(args) -> int:
                              f"https://github.com/{repo}/blob/{revision}/{quote(path, safe='/')}",
                              fingerprint(name, desc)))
         print(f"[index] coverage: {json.dumps({'discovered': len(jobs), **coverage}, sort_keys=True)}")
-        if coverage["fetch_failed"] or coverage["parse_failed"]:
+        limit = getattr(args, "max_parse_failures", 0)
+        if limit < 0:
+            raise ValueError("--max-parse-failures must be zero or positive")
+        if coverage["fetch_failed"] or coverage["parse_failed"] > limit:
             print("[index] refresh failed; last published index and cache preserved", file=sys.stderr)
+            if coverage["parse_failed"] and not coverage["fetch_failed"]:
+                print(f"[index] {coverage['parse_failed']} SKILL.md file(s) failed YAML parsing "
+                      f"(limit {limit}). Fix or exclude the sources, or rerun with "
+                      f"--max-parse-failures N to publish an index that records them in index_skips.",
+                      file=sys.stderr)
             return 1
+        if coverage["parse_failed"]:
+            print(f"[index] publishing with {coverage['parse_failed']} unparsable SKILL.md file(s) "
+                  f"recorded in index_skips (limit {limit}); fetch failures always abort.",
+                  file=sys.stderr)
 
         # Fetches are complete before publication. One transaction replaces all derived rows.
         db.execute("BEGIN IMMEDIATE")
@@ -359,6 +375,7 @@ def cmd_index(args) -> int:
                            (cur.lastrowid, row[0], row[1], row[2]))
         identity = hashlib.sha256(json.dumps(sorted(rows), ensure_ascii=False).encode()).hexdigest()
         metadata = {"parser_version": PARSER_VERSION, "identity": identity,
+                    "parse_failures": str(coverage["parse_failed"]),
                     "created_at": datetime.now(timezone.utc).isoformat(),
                     "coverage": json.dumps({'discovered': len(jobs), **coverage})}
         db.executemany("INSERT OR REPLACE INTO index_meta(key,value) VALUES(?,?)", metadata.items())
@@ -380,6 +397,14 @@ def cmd_stats(args) -> int:
     for repo, n in q("SELECT repo, COUNT(*) FROM skills WHERE dup_of IS NULL "
                      "GROUP BY repo ORDER BY 2 DESC LIMIT 10"):
         print(f"  {n:6d}  {repo}")
+    try:
+        skipped = q("SELECT reason, COUNT(*) FROM index_skips GROUP BY reason ORDER BY 2 DESC").fetchall()
+    except sqlite3.Error:
+        skipped = []
+    if skipped:
+        print("\nskipped by the last build:")
+        for reason, n in skipped:
+            print(f"  {n:6d}  {reason}")
     print("\nsources with no SKILL.md (link lists, phase 2):")
     for repo, note in q("SELECT repo, note FROM sources WHERE listed=0 ORDER BY repo"):
         print(f"    {repo}  ({note})")
@@ -926,7 +951,10 @@ def main() -> int:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = p.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("sources"); s.add_argument("--sources", default=SOURCES); s.set_defaults(fn=cmd_sources)
-    a = sub.add_parser("index"); a.add_argument("--db", default=DB); a.add_argument("--sources", default=SOURCES); a.add_argument("--workers", type=int, default=16); a.set_defaults(fn=cmd_index)
+    a = sub.add_parser("index"); a.add_argument("--db", default=DB); a.add_argument("--sources", default=SOURCES); a.add_argument("--workers", type=int, default=16)
+    a.add_argument("--max-parse-failures", type=int, default=0, metavar="N",
+                   help="Publish even when up to N SKILL.md files fail YAML parsing; they are recorded in index_skips. Fetch failures always abort (default: 0).")
+    a.set_defaults(fn=cmd_index)
     b = sub.add_parser("stats"); b.add_argument("--db", default=DB); b.set_defaults(fn=cmd_stats)
     c = sub.add_parser("route")
     c.add_argument("project")

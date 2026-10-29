@@ -178,6 +178,9 @@ flowchart LR
   repository, path and blob SHA**. A changed blob becomes an error again; no blanket waiver.
 - Successful refresh atomically replaces skills, FTS5, sources, caches, skip accounting
   and corpus metadata. Any discovery/fetch/parse failure preserves the last good snapshot.
+  One malformed upstream `SKILL.md` therefore blocks a refresh; `--max-parse-failures N`
+  publishes the rest and records each unparsable file in `index_skips`
+  (`reason = parse_failed`), surfaced by `stats`. Fetch failures always abort.
 - Unicode-preserving SHA-256 fingerprints group **normalized metadata**, not full skill
   bodies. Source rows remain available via duplicate pointers; metadata equality does not
   prove equal instructions.
