@@ -158,6 +158,8 @@ Three full runs over the 108-source list, on this machine, with the pinned `.ven
 | 1 | `discovered 28510 / parsed 28345 / parse_failed 37 / fetch_failed 0` → aborted (37 upstream files with invalid YAML) |
 | 2 | `parsed 28336 / parse_failed 37 / fetch_failed 9` → aborted (strict fetch policy) |
 | 3 | `parsed 28329 / parse_failed 37 / fetch_failed 16` → aborted, now with 403 retries and four attempts |
+| 4 | `cached 0 / parsed 28342 / parse_failed 37 / fetch_failed 3` (`http429 (throttled): 3`) → aborted, but 28,342 rows were flushed to the cache |
+| 5 | `cached 28342 / parsed 3 / parse_failed 37 / fetch_failed 0` → **published** |
 
 What the failures were not:
 
@@ -180,7 +182,26 @@ paid that cost again. Three changes follow from the evidence:
   `fetch_cache_meta.fm_parser_version`, and an abort reports the failure reasons and the cached
   fraction, so the next run only requests what is missing.
 
+Attempt 5 is the proof that resuming works: it read 28,342 rows from the cache and made three
+network requests, instead of paying the full 28,500-file budget that had caused the throttling.
+
+Published snapshot on this machine (`created_at 2026-10-29T12:24:13Z`), read back from the file
+with `stats`:
+
+| | Before (2026-10-10) | Published (2026-10-29) |
+|---|---|---|
+| rows | 26,013 | **28,345** |
+| unique skills | 15,544 | **17,503** |
+| metadata duplicates | 10,469 | 10,842 |
+| parser | — | version 8 |
+
+`index_meta.coverage` = `{"discovered": 28510, "cached": 28342, "parsed": 3,
+"missing_metadata": 127, "known_negative_fixture": 1, "fetch_failed": 0, "parse_failed": 37}`, so
+`discovered == cached + parsed + missing_metadata + known_negative_fixture + parse_failed` and
+nothing was silently dropped. `stats` lists what the build skipped — 127 `missing_metadata`,
+37 `parse_failed`, 1 `known_negative_fixture` — and a live `shortlist` read against the new
+snapshot returns the expected `python-testing` skills.
+
 Verified offline (`test_router` 45 tests, `discover -s tests` 79, `selftest`) on Windows 11 /
-Python 3.11.16 and Linux (WSL, Python 3.12.3). The published snapshot for this machine is
-recorded below once the resumed run completes.
+Python 3.11.16 and Linux (WSL, Python 3.12.3).
 
