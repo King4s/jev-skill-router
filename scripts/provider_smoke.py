@@ -24,8 +24,10 @@ from mcp_smoke import (GOOD, INIT, HttpClient, decode_tool, failed, free_port,
 
 TOKEN = 'test-only-mcp-token-01234567890123456789'
 KEYS = {'jev': 'test-only-jev-key', 'perplexity': 'test-only-pplx-key',
+        'openai': 'test-only-openai-key',
         'custom': 'test-only-custom-key'}
 KEY_ENVS = {'jev': 'TEST_JEV_KEY', 'perplexity': 'PERPLEXITY_API_KEY',
+            'openai': 'OPENAI_API_KEY',
             'custom': 'TEST_CUSTOM_KEY'}
 
 
@@ -52,18 +54,35 @@ def fixture_server(label, records, plan):
             body = json.loads(raw)
             records.append({'server': label, 'path': self.path, 'body': body,
                             'bearer': self.headers.get('Authorization'), 'bytes': len(raw)})
-            answers = {key: json.loads(json.dumps(GOOD)) for key in body['questions']}
-            mode = plan.get('mode', 'good')
+            openai = isinstance(body['questions'], list)
+            questions = {q['name']: q for q in body['questions']} if openai else body['questions']
+            answers = {key: json.loads(json.dumps(GOOD)) for key in questions}
+            mode = plan.get(label, {}).get('mode', plan.get('mode', 'good'))
             index = len(records) - 1
             status, headers = 200, {}
             value = {'model': plan.get('models', ['test-resolved'])[index % len(plan.get('models', ['test-resolved']))],
                      'answers': answers}
             if mode == 'unknown' and index == 1:
                 answers['unknown'] = GOOD
+            if mode == 'unexpected':
+                answers['unknown'] = GOOD
+            if mode == 'low-confidence':
+                for answer in answers.values():
+                    answer['confidence'] = 0
             if mode == 'missing':
                 answers.pop(next(iter(answers)))
             if mode == 'invalid':
-                answers[next(iter(answers))] = plan['answer']
+                answers[next(iter(answers))] = plan.get(label, {}).get('answer', plan.get('answer'))
+            if mode == 'fail':
+                status = 503
+            if openai:
+                value['answers'] = [
+                    {**answer, 'name': name,
+                     'probabilities': [{'value': int(i), 'label': router.LEVELS[int(i)], 'probability': p}
+                                       for i, p in answer.get('probabilities', {}).items()]}
+                    for name, answer in reversed(list(answers.items()))]
+                if mode == 'duplicate':
+                    value['answers'].append(value['answers'][0])
             if mode == 'redirect':
                 status, headers = 307, {'Location': plan['location']}
             if mode == 'retry-after':
@@ -156,6 +175,17 @@ def wire(records, provider, endpoint, model, candidates):
         [{'server': r['server'], 'path': r['path'], 'model': r['body']['model'],
           'selected_key_used': r['bearer'] == 'Bearer ' + KEYS[provider],
           'wrong_legacy_key_used': r['bearer'] == 'Bearer test-wrong-legacy-key'} for r in records])
+    if provider == 'openai':
+        questions = [q for r in records for q in r['body']['questions']]
+        assert len(questions) == len(candidates)
+        assert all(0 < len(r['body']['questions']) <= 128 and r['bytes'] <= 131072 for r in records)
+        assert all([q['name'] for q in r['body']['questions']] ==
+                   [f'skill_{i:03}' for i in range(len(r['body']['questions']))] for r in records)
+        assert [json.loads(q['instructions'])['candidate_skill'] for q in questions] == [
+            {'name': c['name'], 'description': c['desc'], 'source_repo': c['repo']} for c in candidates]
+        assert all(r['body']['input'][0]['content'][0]['data']['project']['spec'] == 'PDF' for r in records)
+        assert all(q['levels'] == [{'label': level} for level in router.LEVELS] for q in questions)
+        return
     questions = [q for r in records for q in r['body']['questions'].values()]
     assert len(questions) == len(candidates)
     assert all(0 < len(r['body']['questions']) <= 128 and r['bytes'] <= 131072 for r in records)
@@ -176,9 +206,10 @@ def run(binary, switching_only=False):
         seed(dbpath)
         records, plan = [], {}
         endpoints = {name: stack.enter_context(fixture_server(name, records, plan))
-                     for name in ('jev', 'perplexity', 'custom', 'legacy')}
+                     for name in ('jev', 'perplexity', 'openai', 'custom', 'legacy')}
         config = {'default': 'jev', 'profiles': {name: {'endpoint': endpoints[name],
                   'model': f'test-{name}-model', 'key_env': KEY_ENVS[name]} for name in KEYS}}
+        config['profiles']['openai'].update(model='gpt-6-luna', wire_format='openai_decisions')
         def save():
             configpath.write_text(json.dumps(config))
         save()
@@ -198,7 +229,7 @@ def run(binary, switching_only=False):
             return tool('skills_route', {'project': 'PDF', 'top': top})
 
         # First assertion is a real baseline wire regression, not new metadata/setup.
-        for provider in ('perplexity', 'jev', 'custom'):
+        for provider in ('perplexity', 'jev', 'custom', 'openai'):
             reset()
             with native(binary, tmp, env(provider, SKILL_ROUTER_PROVIDER=None) if provider == 'jev' else env(provider)) as tool:
                 value = decode_tool(route(tool))
@@ -209,6 +240,76 @@ def run(binary, switching_only=False):
                 assert value['meta']['provider'] == provider
                 assert value['meta']['requested_model'] == config['profiles'][provider]['model']
             print(f'PASS selected {provider}: exact endpoint/path/model/bearer; other keys ignored', flush=True)
+
+        for top in (129, 300):
+            reset()
+            with native(binary, tmp, env('openai')) as tool:
+                value = decode_tool(route(tool, top))
+                wire(records, 'openai', endpoints['openai'], 'gpt-6-luna', value['candidates'])
+                coverage(value)
+                assert len(value['ranked']) == top and not value['rejected']
+            print(f'PASS OpenAI named-array wire and normalization: {top} candidates', flush=True)
+        for mode in ('missing', 'invalid', 'duplicate'):
+            reset(mode=mode, answer={'type': 'refusal'})
+            with native(binary, tmp, env('openai')) as tool:
+                reply = route(tool)
+                if mode == 'duplicate':
+                    assert failed(reply), reply
+                else:
+                    value = decode_tool(reply)
+                    coverage(value)
+                    assert len(value['ranked']) == 1 and len(value['rejected']) == 1
+            print(f'PASS OpenAI {mode} answers fail safely', flush=True)
+
+        # Default Jev -> OpenAI policy, with real local HTTP requests and reduced pending sets.
+        config['fallback'] = 'openai'; save()
+        reset(**{'jev': {'mode': 'low-confidence'}})
+        with native(binary, tmp, env('jev', SKILL_ROUTER_PROVIDER=None)) as tool:
+            value = decode_tool(route(tool)); coverage(value)
+            assert [record['server'] for record in records] == ['jev']
+            assert not value['degraded'] and all(row['confidence'] == 0 for row in value['ranked'])
+        for mode in ('good', 'missing', 'invalid', 'fail'):
+            reset(**{'jev': {'mode': mode, 'answer': {'type': 'refusal'}}})
+            with native(binary, tmp, env('jev', SKILL_ROUTER_PROVIDER=None)) as tool:
+                value = decode_tool(route(tool))
+                coverage(value)
+                assert len(value['ranked']) == 2 and not value['rejected']
+                assert [record['server'] for record in records] == (['jev'] if mode == 'good' else ['jev', 'openai'])
+                assert value['degraded'] == (mode != 'good')
+                assert value['meta']['used_providers'] == (['jev'] if mode == 'good' else ['openai'] if mode == 'fail' else ['jev', 'openai'])
+                if mode in ('missing', 'invalid'):
+                    assert len(records[1]['body']['questions']) == 1
+            print(f'PASS default Jev -> OpenAI: {mode}; no unnecessary call or retry', flush=True)
+        reset(**{'jev': {'mode': 'fail'}})
+        with native(binary, tmp, env('jev', SKILL_ROUTER_PROVIDER=None)) as tool:
+            value = decode_tool(route(tool, 129)); coverage(value)
+            assert len(value['ranked']) == 129
+            assert [record['server'] for record in records] == ['jev', 'openai', 'openai']
+        reset(**{'jev': {'mode': 'unexpected'}})
+        with native(binary, tmp, env('jev', SKILL_ROUTER_PROVIDER=None)) as tool:
+            value = decode_tool(route(tool, 129)); coverage(value)
+            assert len(value['ranked']) == 129
+            assert [record['server'] for record in records] == ['jev', 'openai', 'openai']
+        reset(**{'jev': {'mode': 'missing'}, 'openai': {'mode': 'fail'}})
+        with native(binary, tmp, env('jev', SKILL_ROUTER_PROVIDER=None)) as tool:
+            value = decode_tool(route(tool)); coverage(value)
+            assert len(value['ranked']) == 1 and len(value['rejected']) == 1
+            assert value['ranked'][0]['used_providers'] == ['jev']
+        for missing_key in ('TEST_JEV_KEY', 'OPENAI_API_KEY'):
+            reset()
+            with native(binary, tmp, env('jev', SKILL_ROUTER_PROVIDER=None, **{missing_key: None})) as tool:
+                value = decode_tool(route(tool)); coverage(value)
+                assert len(value['ranked']) == 2
+                assert [record['server'] for record in records] == (['openai'] if missing_key == 'TEST_JEV_KEY' else ['jev'])
+        reset(**{'jev': {'mode': 'fail'}, 'openai': {'mode': 'fail'}})
+        with native(binary, tmp, env('jev', SKILL_ROUTER_PROVIDER=None)) as tool:
+            assert failed(route(tool))
+            assert [record['server'] for record in records] == ['jev', 'openai']
+        reset()
+        with native(binary, tmp, env('jev', TEST_JEV_KEY=None)) as tool:
+            assert failed(route(tool)) and not records
+        del config['fallback']; save()
+        print('PASS fallback key isolation, strict explicit selection, stopped failed primary, and total failure', flush=True)
         if switching_only:
             return
 

@@ -13,11 +13,12 @@ import time
 import urllib.error
 import urllib.request
 
-DEFAULT_MODELS = {"jev": "jev-latest", "perplexity": "pplx-decider-v1.1-27b"}
+DEFAULT_MODELS = {"jev": "jev-latest", "perplexity": "pplx-decider-v1.1-27b", "openai": "gpt-6-luna"}
 ENDPOINTS = {"jev": "https://api.typesafe.ai/v1/systemone",
-             "perplexity": "https://api.perplexity.ai/v1/decisions"}
-MODEL_ENV = {"jev": "JEV_MODEL", "perplexity": "PERPLEXITY_DECISION_MODEL"}
-KEY_ENV = {"jev": "TYPESAFE_API_KEY", "perplexity": "PERPLEXITY_API_KEY"}
+             "perplexity": "https://api.perplexity.ai/v1/decisions",
+             "openai": "https://api.openai.com/v1/decisions"}
+MODEL_ENV = {"jev": "JEV_MODEL", "perplexity": "PERPLEXITY_DECISION_MODEL", "openai": "OPENAI_DECISION_MODEL"}
+KEY_ENV = {"jev": "TYPESAFE_API_KEY", "perplexity": "PERPLEXITY_API_KEY", "openai": "OPENAI_API_KEY"}
 KEY_FILE = Path.home() / ".config" / "jev-loop" / "typesafe_api_key"
 MAX_QUESTIONS = 128
 MAX_RETRY_DELAY = 30.0
@@ -53,7 +54,53 @@ def resolve_model(provider: str, override: str | None = None) -> str:
     model = override if override is not None else os.environ.get(MODEL_ENV[provider], DEFAULT_MODELS[provider])
     if not isinstance(model, str) or not model.strip() or len(model) > 200 or any(ord(c) < 32 for c in model):
         raise ProviderError(f"Invalid {provider} model setting.")
+    if provider == "openai" and model.strip() != "gpt-6-luna":
+        raise ProviderError("OpenAI Decisions currently supports only gpt-6-luna.")
     return model.strip()
+
+
+def decision_body(provider: str, model: str, state: dict, questions: dict) -> bytes:
+    """Serialize the actual wire request, also used for routing preflight."""
+    body = {"model": model, "state": state, "questions": questions}
+    try:
+        if provider == "openai":
+            body = {"model": model,
+                    "input": [{"role": "user", "content": [{"type": "input_json", "data": state}]}],
+                    "questions": [{"name": name, "type": "score",
+                                   "instructions": json.dumps(question["instructions"], allow_nan=False),
+                                   "levels": [{"label": level} for level in question["criteria"]]}
+                                  for name, question in questions.items()]}
+        return json.dumps(body, allow_nan=False).encode("utf-8")
+    except (KeyError, TypeError, ValueError, RecursionError):
+        raise ProviderError("The decision request must contain valid finite JSON data.") from None
+
+
+def _openai_answers(result: dict, questions: dict) -> dict:
+    """Normalize named arrays without concealing duplicates or malformed scores."""
+    if not isinstance(result, dict) or not isinstance(result.get("answers"), list):
+        raise ProviderError("openai returned an invalid answers envelope.")
+    answers = {}
+    for answer in result["answers"]:
+        name = answer.get("name") if isinstance(answer, dict) else None
+        if not isinstance(name, str) or name not in questions or name in answers:
+            raise ProviderError("openai returned duplicate, unnamed, or unexpected answer IDs.")
+        normalized = dict(answer)
+        if answer.get("type") == "score":
+            entries = answer.get("probabilities")
+            probabilities = {}
+            levels = questions[name]["criteria"]
+            valid = isinstance(entries, list) and len(entries) == len(levels)
+            if valid:
+                for entry in entries:
+                    index = entry.get("value") if isinstance(entry, dict) else None
+                    if (type(index) is not int or not 0 <= index < len(levels)
+                            or str(index) in probabilities or entry.get("label") != levels[index]):
+                        valid = False
+                        break
+                    probabilities[str(index)] = entry.get("probability")
+            normalized["probabilities"] = probabilities if valid else None
+        answers[name] = normalized
+    return {**result, "answers": answers}
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -90,11 +137,12 @@ def _retry_delay(headers, attempt: int) -> float:
 
 
 def decision_call(provider: str, state: dict, questions: dict, retries: int = 3,
-                  model: str | None = None) -> dict:
+                  model: str | None = None, timeout: float | None = None) -> dict:
     """Call one provider, failing permanent errors without retrying paid requests.
 
     Perplexity contract: https://docs.perplexity.ai/docs/decisions/quickstart
     Jev contract: https://docs.typesafe.ai/api
+    OpenAI contract: https://developers.openai.com/api/reference/resources/decisions/methods/create
     """
     selected = resolve_model(provider, model)
     key = provider_key(provider)
@@ -102,16 +150,14 @@ def decision_call(provider: str, state: dict, questions: dict, retries: int = 3,
         raise ProviderError(f"A provider request needs 1 to {MAX_QUESTIONS} questions.")
     if not isinstance(retries, int) or isinstance(retries, bool) or not 0 <= retries <= 3:
         raise ProviderError("Retries must be an integer from 0 to 3.")
-    try:
-        body = json.dumps({"model": selected, "state": state, "questions": questions},
-                          allow_nan=False).encode("utf-8")
-    except (TypeError, ValueError, RecursionError):
-        raise ProviderError("The decision request must contain finite JSON data.") from None
+    if timeout is not None and (type(timeout) not in (int, float) or not math.isfinite(timeout) or not 1 <= timeout <= 180):
+        raise ProviderError("Timeout must be a finite number from 1 to 180 seconds.")
+    body = decision_body(provider, selected, state, questions)
     if len(body) > 32 * 1024 * 1024:
         raise ProviderError("The decision request exceeds 32 MiB.")
     request = urllib.request.Request(ENDPOINTS[provider], data=body, headers={
         "Authorization": f"Bearer {key}", "Content-Type": "application/json"})
-    timeout = 30 if provider == "perplexity" else 180
+    timeout = timeout if timeout is not None else 30 if provider in ("perplexity", "openai") else 180
     for attempt in range(retries + 1):
         try:
             with _open(request, timeout=timeout) as response:
@@ -139,6 +185,8 @@ def decision_call(provider: str, state: dict, questions: dict, retries: int = 3,
                 result = json.loads(payload)
             except (ValueError, UnicodeError, RecursionError):
                 raise ProviderError(f"{provider} returned invalid JSON.") from None
+            if provider == "openai":
+                result = _openai_answers(result, questions)
             if not isinstance(result, dict) or not isinstance(result.get("answers"), dict):
                 raise ProviderError(f"{provider} returned an invalid answers envelope.")
             result.pop("_request_id", None)

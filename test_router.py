@@ -117,7 +117,7 @@ class ReviewChecks(unittest.TestCase):
 
     def route(self, response, top=40):
         out = self.root / 'route.json'
-        args = SimpleNamespace(db=str(self.path), project='Read PDF files', top=top,
+        args = SimpleNamespace(db=str(self.path), project='Read PDF files', top=top, provider='jev',
                                show=25, out=str(out), rule='plain',
                                installed_root=[str(self.root / 'no-installed-skills')])
         with patch.object(router, 'jev_call', return_value=response) as call:

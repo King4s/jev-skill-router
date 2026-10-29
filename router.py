@@ -44,7 +44,7 @@ from pathlib import Path
 import yaml
 from yaml.scanner import ScannerError
 from decision_providers import (KEY_FILE, MAX_QUESTIONS, REQUEST_ID,
-                                ProviderError, decision_call, provider_key, resolve_model)
+                                ProviderError, decision_body, decision_call, provider_key, resolve_model)
 from provider_priority import provider_order
 
 ROOT = Path(__file__).resolve().parent
@@ -634,16 +634,16 @@ def corpus_meta(db: sqlite3.Connection) -> dict:
             "coverage": json.loads(stored["coverage"]) if "coverage" in stored else None}
 
 
-def score_candidates(project: str, cands: list[dict], provider: str = "jev",
+def score_candidates(project: str, cands: list[dict], provider: str = "both",
                      jev_model: str | None = None, perplexity_model: str | None = None,
-                     priority_profile=None) -> dict:
+                     priority_profile=None, openai_model: str | None = None) -> dict:
     """Rank candidates with the preferred provider, then fail over only as needed."""
-    if provider not in ("jev", "perplexity", "both"):
-        raise ProviderError("Choose a decision provider: jev, perplexity, or both.")
+    if provider not in ("jev", "perplexity", "openai", "both"):
+        raise ProviderError("Choose a decision provider: jev, perplexity, openai, or both.")
     if not isinstance(project, str) or not project.strip():
         raise ProviderError("The project description must not be empty.")
-    names = ["jev", "perplexity"] if provider == "both" else [provider]
-    overrides = {"jev": jev_model, "perplexity": perplexity_model}
+    names = ["jev", "openai"] if provider == "both" else [provider]
+    overrides = {"jev": jev_model, "perplexity": perplexity_model, "openai": openai_model}
     result = {"schema_version": 1, "project": project, "provider": provider,
               "aggregation": "priority_failover" if provider == "both" else "single",
               "status": "unavailable", "used_providers": [],
@@ -688,7 +688,8 @@ def score_candidates(project: str, cands: list[dict], provider: str = "jev",
             options = {"model": metadata["requested_model"]}
             if provider == "both":
                 options["retries"] = 0
-            body = json.dumps({"model": metadata["requested_model"], "state": state, "questions": batch}, allow_nan=False).encode()
+                options["timeout"] = 30
+            body = decision_body(name, metadata["requested_model"], state, batch)
             if len(body) > MAX_REQUEST_BYTES:
                 raise ProviderError(f"{name} request exceeds client budget of {MAX_REQUEST_BYTES} bytes; reduce --top")
             raw = jev_call(state, batch, **options) if provider == "jev" else decision_call(name, state, batch, **options)
@@ -858,9 +859,9 @@ def annotate_installed(ranked: list[dict], installed: dict[str, str]) -> list[st
 
 
 def cmd_route(args) -> int:
-    provider = getattr(args, "provider", None) or os.environ.get("SKILL_ROUTER_PROVIDER", "jev")
-    if provider not in ("jev", "perplexity", "both"):
-        raise ProviderError("SKILL_ROUTER_PROVIDER must be jev, perplexity, or both.")
+    provider = getattr(args, "provider", None) or os.environ.get("SKILL_ROUTER_PROVIDER", "both")
+    if provider not in ("jev", "perplexity", "openai", "both"):
+        raise ProviderError("SKILL_ROUTER_PROVIDER must be jev, perplexity, openai, or both.")
     if not args.project.strip():
         raise ProviderError("The project description must not be empty.")
     # Read-only opening avoids creating a misleading empty index when it is missing.
@@ -879,7 +880,8 @@ def cmd_route(args) -> int:
     started = time.perf_counter()
     try:
         result = score_candidates(args.project, cands, provider, getattr(args, "jev_model", None),
-                                  getattr(args, "perplexity_model", None), getattr(args, "priority_profile", None))
+                                  getattr(args, "perplexity_model", None), getattr(args, "priority_profile", None),
+                                  openai_model=getattr(args, "openai_model", None))
     except ProviderError as error:
         # The scoring API stays strict; the CLI preserves a failed run for inspection.
         result = {"schema_version": 1, "project": args.project, "provider": provider,
@@ -1001,10 +1003,11 @@ def main() -> int:
     c.add_argument("--show", type=positive_int, default=25)
     c.add_argument("--rule", choices=RULES, default="plain")
     c.add_argument("--out")
-    c.add_argument("--provider", choices=("jev", "perplexity", "both"),
-                   help="Decision maker selection; overrides SKILL_ROUTER_PROVIDER (default: jev).")
+    c.add_argument("--provider", choices=("jev", "perplexity", "openai", "both"),
+                   help="Decision maker selection; overrides SKILL_ROUTER_PROVIDER (default: both, Jev then OpenAI).")
     c.add_argument("--jev-model", help="Override JEV_MODEL (default: jev-latest).")
     c.add_argument("--perplexity-model", help="Override PERPLEXITY_DECISION_MODEL (default: pplx-decider-v1.1-27b).")
+    c.add_argument("--openai-model", help="Override OPENAI_DECISION_MODEL (currently only gpt-6-luna).")
     c.add_argument("--priority-profile", help="Model-matched accuracy/cost JSON; overrides SKILL_ROUTER_PRIORITY_PROFILE in both mode.")
     c.add_argument("--installed-root", action="append", metavar="DIR",
                    help="Where installed skills live; repeatable. Overrides SKILL_ROUTER_INSTALL_ROOTS and the defaults.")

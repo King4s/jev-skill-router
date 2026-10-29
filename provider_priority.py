@@ -9,7 +9,7 @@ from pathlib import Path
 from decision_providers import ProviderError
 
 DEFAULT_PROFILE = Path(__file__).resolve().parent / "provider-priority.json"
-DEFAULT_ORDER = ("perplexity", "jev")
+DEFAULT_ORDER = ("jev", "openai", "perplexity")
 
 
 def provider_order(models: dict, profile_path=None) -> dict:
@@ -21,17 +21,24 @@ def provider_order(models: dict, profile_path=None) -> dict:
         profile = json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, ValueError, UnicodeError, RecursionError):
         raise ProviderError("Cannot read a valid decision-provider priority profile.") from None
-    allowed = {"schema_version", "source", "providers", "notes", "measurement"}
+    allowed = {"schema_version", "source", "providers", "notes", "measurement", "order"}
     if not isinstance(profile, dict) or set(profile) - allowed or type(profile.get("schema_version")) is not int or profile["schema_version"] != 1:
         raise ProviderError("Invalid priority profile schema.")
     records = profile.get("providers")
     if not isinstance(records, dict) or not records or set(records) - set(DEFAULT_ORDER):
         raise ProviderError("Invalid priority profile providers.")
+    active = [name for name in DEFAULT_ORDER if name in models]
+    if not active or set(models) - set(DEFAULT_ORDER):
+        raise ProviderError("Invalid selected priority providers.")
+    explicit = profile.get("order")
+    if explicit is not None and (not isinstance(explicit, list) or not all(isinstance(name, str) for name in explicit)
+                                 or len(explicit) != len(active) or set(explicit) != set(active)):
+        raise ProviderError("Invalid explicit provider order.")
     source = profile.get("source", "User-supplied measurements")
     if not isinstance(source, str) or len(source) > 500:
         raise ProviderError("Invalid priority profile source.")
     metrics = {}
-    for name in DEFAULT_ORDER:
+    for name in active:
         record = records.get(name)
         if record is None:
             metrics[name] = {"accuracy": None, "cost_per_candidate_usd": None, "model_matches": False}
@@ -58,8 +65,10 @@ def provider_order(models: dict, profile_path=None) -> dict:
         quality = metrics[name]["accuracy"]
         cost = metrics[name]["cost_per_candidate_usd"]
         return (quality is None, -(quality or 0), cost is None, cost or 0, DEFAULT_ORDER.index(name))
-    order = sorted(DEFAULT_ORDER, key=rank)
+    order = sorted(active, key=rank)
     coverage = sum(row["accuracy"] is not None for row in metrics.values())
-    basis = "measured_accuracy_then_measured_cost" if coverage == len(DEFAULT_ORDER) else "provisional_order_incomplete_quality_evidence" if coverage else "provisional_order_quality_unavailable"
+    basis = "measured_accuracy_then_measured_cost" if coverage == len(active) else "provisional_order_incomplete_quality_evidence" if coverage else "provisional_order_quality_unavailable"
+    if explicit is not None:
+        order, basis = explicit, "user_selected_order"
     return {"order": order, "basis": basis,
             "source": source, "metrics": metrics}

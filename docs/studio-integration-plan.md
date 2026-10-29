@@ -1,5 +1,8 @@
 # Optional Mefi Studio integration plan
 
+> Historical plan. Current policy is Jev primary with OpenAI fallback; see README.md and SKILL.md for the implemented contracts.
+
+
 Status: proposed integration, prepared on 2026-10-10. This document specifies future
 work in the router and Mefi Studio. It does not describe an already shipped MCP
 server, installer, or Studio integration.

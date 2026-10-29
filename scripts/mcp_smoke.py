@@ -142,7 +142,7 @@ def wait_ready(proc, port):
 
 def wire_checks(client):
     initialized = client.rpc('initialize', INIT)
-    assert initialized['result']['serverInfo']['name'] == 'jev-skill-router'
+    assert initialized['result']['serverInfo']['name'] == 'skill-router'
     names = {t['name'] for t in client.rpc('tools/list')['result']['tools']}
     assert names == {'skills_stats', 'skills_search', 'skills_route'}, names
     stats = decode_tool(client.tool('skills_stats'))
