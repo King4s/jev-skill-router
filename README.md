@@ -23,6 +23,10 @@ typed Score per candidate**, in batches of at most 128 questions, to one configu
 provider. It never installs or executes skills; the Python `route` command only
 marks which recommendations are already installed on the machine.
 
+The native server is **Unix-only**: `src/main.rs` installs Unix signal handlers and the
+`jev-skill-refresh` utility hard-codes a Linux service layout, so `cargo build` fails on
+Windows. The Python CLI is the supported entry point there.
+
 The Python indexer (with PyYAML) and evaluation scripts are **offline tooling**.
 The Rust service opens SQLite read-only and calls the selected provider directly: no Python wrapper,
 shell subprocess, or skill execution in the runtime.

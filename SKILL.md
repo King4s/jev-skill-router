@@ -34,7 +34,10 @@ machine — it never installs or activates skills.
 
 ## Native MCP (preferred for agent clients)
 
-Build with `cargo build --release --locked`. Start `target/release/jev-skill-router`
+Build with `cargo build --release --locked`. The native server and `jev-skill-refresh` are
+Unix-only — `src/main.rs` uses `tokio::signal::unix` and the refresh utility hard-codes a
+Linux service layout, so the build fails on Windows; use the Python CLI there.
+Start `target/release/jev-skill-router`
 with `SKILL_ROUTER_DB` set to the existing index. This serves stdio MCP and exposes
 `skills_stats`, `skills_search(query, top)` and `skills_route(project, top)`.
 For an already deployed internal Streamable HTTP endpoint, use its `/mcp` URL and
