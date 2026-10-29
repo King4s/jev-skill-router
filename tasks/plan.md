@@ -1,5 +1,8 @@
 # Implementation plan: selectable decision makers
 
+> Historical plan. Current policy is Jev primary with OpenAI fallback; see README.md and SKILL.md for the implemented contracts.
+
+
 ## Scope
 
 Add Perplexity Decisions to the existing Python router with three explicit modes:

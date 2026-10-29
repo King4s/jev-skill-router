@@ -2,13 +2,24 @@
 
 ## Unreleased
 
+### Changed
+
+- Rename the product, skill identifier, and GitHub repository to Skill router
+  (`skill-router`). Legacy executable/package and service paths remain compatible.
+- Default to Jev primary with OpenAI Decisions fallback in Python and native MCP.
+  `both` now means Jev/OpenAI; Perplexity remains explicit-only. Valid low-confidence
+  primary answers never trigger fallback, and only unresolved candidates are sent
+  to the standby. Failover does not retry failed requests and reports provider errors.
+- Record the owner's explicit priority separately from measured quality, with the
+  local synthetic evaluation receipt and its limitations.
+
+
 ### Added
 
 - Explicit opt-in OpenAI Decisions support in Python (`--provider openai`) and
   native profiles (`wire_format: "openai_decisions"`), using `gpt-6-luna` and
   `OPENAI_API_KEY`. Named arrays are normalized for the existing score validator;
-  duplicate/unknown names fail and refusals remain rejected. Defaults and the
-  Perplexity/Jev `both` policy are unchanged. Offline contract and native wire
+  duplicate/unknown names fail and refusals remain rejected. Default failover is Jev → OpenAI. Offline contract and native wire
   fixtures cover translation, batching, partial answers and credential selection.
 - `index --max-parse-failures N` publishes an index when up to N upstream `SKILL.md` files
   fail YAML parsing, recording each one in `index_skips` with reason `parse_failed`. The
@@ -20,11 +31,12 @@
   records `meta.install_scan` in `--out`. The skill instructions now require asking the
   user whether to install a suggested but absent skill instead of reporting it
   unavailable and continuing. Native MCP output and behaviour are unchanged.
-- Choose Jev, Perplexity Decisions, or both when recommending skills. Jev remains
-  the default, and each provider keeps its own credentials and model selection.
+- Explicit Jev, OpenAI Decisions, and Perplexity selections keep separate
+  credentials and model settings. The current default chain is Jev → OpenAI.
 - Ordered failover in `both`: higher measured accuracy is preferred, with lower
   measured cost breaking exact accuracy ties. The shipped external benchmark
-  profile starts with Perplexity, then Jev, and can be replaced through
+  profile originally used Perplexity then Jev; the current owner-selected order
+  is Jev then OpenAI and can be replaced through
   `--priority-profile` or `SKILL_ROUTER_PRIORITY_PROFILE`.
 - Routing output exposes priority order, measurement basis and metrics, plus
   the provider that supplied each accepted answer.

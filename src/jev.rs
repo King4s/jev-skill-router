@@ -168,6 +168,7 @@ pub struct Ranking {
 }
 
 impl Ranking {
+    #[cfg(test)]
     fn add(&mut self, candidates: &[Value], response: &Value) {
         let (ranked, rejected) = rank(candidates, response);
         self.ranked.extend(ranked);
@@ -188,6 +189,24 @@ impl Ranking {
             .cloned()
             .unwrap_or(Value::Null)
     }
+
+    pub fn used_providers(&self) -> Vec<String> {
+        let mut names = Vec::new();
+        let mut rows: Vec<_> = self.ranked.iter().collect();
+        rows.sort_by_key(|row| row["is_fallback"].as_bool().unwrap_or(false));
+        for row in rows {
+            if let Some(name) = row["used_providers"][0].as_str() {
+                if !names.iter().any(|value| value == name) {
+                    names.push(name.to_owned());
+                }
+            }
+        }
+        names
+    }
+
+    pub fn degraded(&self) -> bool {
+        !self.rejected.is_empty() || self.ranked.iter().any(|row| row["is_fallback"] == true)
+    }
 }
 
 pub async fn route(
@@ -204,30 +223,130 @@ pub async fn route(
     if candidates.is_empty() {
         return Ok(result);
     }
-    provider.require_ready()?;
-    // Preflight every batch before the first billable request.
-    let bodies = prepare_batches(project, candidates, &provider.model, provider.wire_format)?;
-    for (batch, body) in candidates.chunks(128).zip(bodies) {
-        let mut response = call(client, &provider.endpoint, &provider.key, &body).await?;
-        if provider.wire_format == crate::providers::WireFormat::OpenaiDecisions {
-            response =
-                crate::openai::normalize(response, &payload(project, batch, &provider.model))?;
-        }
-        result.add(batch, &response);
+    let mut providers = vec![provider];
+    if let Some(fallback) = provider.fallback.as_deref() {
+        providers.push(fallback);
     }
+    // Preflight every batch before the first billable request.
+    for selected in &providers {
+        prepare_batches(project, candidates, &selected.model, selected.wire_format)?;
+    }
+    let failover = providers.len() > 1;
+    let mut failed = Map::new();
+    for batch in candidates.chunks(128) {
+        let mut pending = batch.to_vec();
+        for selected in &providers {
+            if pending.is_empty() {
+                break;
+            }
+            for row in &mut pending {
+                row.as_object_mut().unwrap().remove("error");
+            }
+            let attempt = if let Some(reason) = failed.get(&selected.name) {
+                Err(anyhow::anyhow!(reason.as_str().unwrap().to_owned()))
+            } else {
+                attempt_batch(client, selected, project, &pending, failover).await
+            };
+            match attempt {
+                Ok(response) => {
+                    let (mut accepted, mut rejected) = rank(&pending, &response);
+                    for row in &mut accepted {
+                        row["used_providers"] = json!([selected.name]);
+                        row["requested_model"] = json!(selected.model);
+                        row["response_model"] =
+                            response.get("model").cloned().unwrap_or(Value::Null);
+                        row["is_fallback"] = json!(selected.name != provider.name);
+                    }
+                    for row in &mut rejected {
+                        row["provider_errors"][&selected.name] = row["error"].clone();
+                    }
+                    result.models.push(
+                        response
+                            .get("model")
+                            .filter(|value| value.is_string())
+                            .cloned()
+                            .unwrap_or(Value::Null),
+                    );
+                    result.ranked.extend(accepted);
+                    pending = rejected;
+                }
+                Err(error) => {
+                    if !failover {
+                        return Err(error);
+                    }
+                    let reason = error.to_string();
+                    failed.insert(selected.name.clone(), json!(reason));
+                    for row in &mut pending {
+                        row["error"] = json!(reason);
+                        row["provider_errors"][&selected.name] = json!(reason);
+                    }
+                }
+            }
+        }
+        result.rejected.extend(pending);
+    }
+    // Restore shortlist order before the stable score sort, including fallback ties.
+    result.ranked.sort_by_key(|row| {
+        candidates
+            .iter()
+            .position(|candidate| candidate["id"] == row["id"])
+            .unwrap_or(usize::MAX)
+    });
     sort_ranked(&mut result.ranked);
     Ok(result)
 }
 
-async fn call(client: &reqwest::Client, url: &str, key: &str, bytes: &[u8]) -> Result<Value> {
+async fn attempt_batch(
+    client: &reqwest::Client,
+    provider: &crate::providers::Provider,
+    project: &str,
+    candidates: &[Value],
+    failover: bool,
+) -> Result<Value> {
+    provider.require_ready()?;
+    let bodies = prepare_batches(project, candidates, &provider.model, provider.wire_format)?;
+    let mut response = call(
+        client,
+        &provider.endpoint,
+        &provider.key,
+        &bodies[0],
+        failover,
+    )
+    .await?;
+    if provider.wire_format == crate::providers::WireFormat::OpenaiDecisions {
+        response =
+            crate::openai::normalize(response, &payload(project, candidates, &provider.model))?;
+    }
+    if failover {
+        let answers = response["answers"].as_object().ok_or_else(|| {
+            anyhow::anyhow!("Decision provider returned an invalid answers envelope")
+        })?;
+        let expected = payload(project, candidates, &provider.model);
+        let questions = expected["questions"].as_object().unwrap();
+        if answers.keys().any(|name| !questions.contains_key(name)) {
+            bail!("Decision provider returned unexpected answer IDs");
+        }
+    }
+    Ok(response)
+}
+
+async fn call(
+    client: &reqwest::Client,
+    url: &str,
+    key: &str,
+    bytes: &[u8],
+    failover: bool,
+) -> Result<Value> {
     if bytes.len() > REQUEST_LIMIT {
         bail!("Provider request exceeds 128 KiB; reduce top");
     }
-    'attempts: for attempt in 0..4 {
+    let attempts = if failover { 1 } else { 4 };
+    'attempts: for attempt in 0..attempts {
         let response = client
             .post(url)
             .bearer_auth(key)
             .header("Content-Type", "application/json")
+            .timeout(Duration::from_secs(if failover { 30 } else { 180 }))
             .body(bytes.to_vec())
             .send()
             .await;
@@ -239,7 +358,7 @@ async fn call(client: &reqwest::Client, url: &str, key: &str, bytes: &[u8]) -> R
                     loop {
                         let chunk = match r.chunk().await {
                             Ok(chunk) => chunk,
-                            Err(_) if attempt < 3 => {
+                            Err(_) if attempt + 1 < attempts => {
                                 tokio::time::sleep(retry_delay(attempt, None)?).await;
                                 continue 'attempts;
                             }
@@ -254,7 +373,8 @@ async fn call(client: &reqwest::Client, url: &str, key: &str, bytes: &[u8]) -> R
                     return serde_json::from_slice(&out)
                         .map_err(|_| anyhow::anyhow!("Invalid provider JSON response"));
                 }
-                if ![408, 429, 500, 502, 503, 504, 529].contains(&status) || attempt == 3 {
+                if ![408, 429, 500, 502, 503, 504, 529].contains(&status) || attempt + 1 == attempts
+                {
                     // Never expose provider bodies, request headers or credentials.
                     bail!("Decision provider returned HTTP {status}");
                 }
@@ -264,7 +384,9 @@ async fn call(client: &reqwest::Client, url: &str, key: &str, bytes: &[u8]) -> R
                 )?;
                 tokio::time::sleep(delay).await;
             }
-            Err(_) if attempt < 3 => tokio::time::sleep(retry_delay(attempt, None)?).await,
+            Err(_) if attempt + 1 < attempts => {
+                tokio::time::sleep(retry_delay(attempt, None)?).await
+            }
             Err(_) => bail!("Provider transport failed after bounded retries"),
         }
     }
@@ -402,6 +524,7 @@ mod tests {
             model: "offline-model".into(),
             key: "synthetic-key".into(),
             wire_format: crate::providers::WireFormat::Systemone,
+            fallback: None,
         };
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())

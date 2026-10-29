@@ -1,0 +1,233 @@
+{
+  "created_at": "2026-10-29T18:00:36.845643+00:00",
+  "manifest_sha256": "b48bcd0d6fc9e9bb34ed4f420f215f310ba3042eaaf5e6a5b298ae564c3176c7",
+  "limitations": [
+    "Synthetic convenience sample and agent-authored relevance labels; no independent human adjudication.",
+    "Repeated answers are correlated; task groups are used for bootstrap differences.",
+    "Sequential client timing includes network overhead; no retries, no warm-up, no deliberate cache busting.",
+    "Common semantic rubric and evidence; provider wire formats and tokenizers differ.",
+    "Classification thresholds are task-disjoint, but domains and reusable skill descriptions can overlap across splits.",
+    "This isolates candidate scoring; it does not measure shortlist retrieval or actual downstream task completion."
+  ],
+  "summary": {
+    "jev": {
+      "models": [
+        "jev-1.14.0"
+      ],
+      "requests": 72,
+      "successful_requests": 72,
+      "valid_answers": 720,
+      "answers": 720,
+      "median_seconds": 0.25235055000121065,
+      "p90_seconds": 0.29127109999899403,
+      "usage": {
+        "input_tokens": 150522,
+        "output_tokens": 12528
+      },
+      "calibrated_threshold": 1.85,
+      "calibration_classification": {
+        "correct": 80,
+        "total": 80,
+        "accuracy": 1.0,
+        "balanced_accuracy": 1.0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "true_positive": 32,
+        "true_negative": 48,
+        "false_positive": 0,
+        "false_negative": 0,
+        "invalid": 0
+      },
+      "test_fixed_threshold": {
+        "correct": 157,
+        "total": 160,
+        "accuracy": 0.98125,
+        "balanced_accuracy": 0.9765625,
+        "precision": 1.0,
+        "recall": 0.953125,
+        "true_positive": 61,
+        "true_negative": 96,
+        "false_positive": 0,
+        "false_negative": 3,
+        "invalid": 0
+      },
+      "test_calibrated_threshold": {
+        "correct": 159,
+        "total": 160,
+        "accuracy": 0.99375,
+        "balanced_accuracy": 0.9921875,
+        "precision": 1.0,
+        "recall": 0.984375,
+        "true_positive": 63,
+        "true_negative": 96,
+        "false_positive": 0,
+        "false_negative": 1,
+        "invalid": 0
+      },
+      "test_probability_mass": {
+        "correct": 160,
+        "total": 160,
+        "accuracy": 1.0,
+        "balanced_accuracy": 1.0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "true_positive": 64,
+        "true_negative": 96,
+        "false_positive": 0,
+        "false_negative": 0,
+        "invalid": 0
+      },
+      "test_ranking": {
+        "precision_at_4": 1.0,
+        "recall_at_4": 1.0,
+        "ndcg_at_4": 1.0,
+        "average_precision": 1.0,
+        "pairwise_accuracy": 1,
+        "relevant_in_top4": 4
+      },
+      "test_top4_relevant": 64,
+      "test_top4_slots": 64,
+      "injection_distractors": 21,
+      "injection_distractors_correct_at_fixed_threshold": 21
+    },
+    "openai": {
+      "models": [
+        "gpt-6-luna"
+      ],
+      "requests": 72,
+      "successful_requests": 72,
+      "valid_answers": 720,
+      "answers": 720,
+      "median_seconds": 0.42147689999910654,
+      "p90_seconds": 0.59920559999955,
+      "usage": {
+        "input_tokens": 168843,
+        "output_tokens": 0
+      },
+      "calibrated_threshold": 1.21,
+      "calibration_classification": {
+        "correct": 80,
+        "total": 80,
+        "accuracy": 1.0,
+        "balanced_accuracy": 1.0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "true_positive": 32,
+        "true_negative": 48,
+        "false_positive": 0,
+        "false_negative": 0,
+        "invalid": 0
+      },
+      "test_fixed_threshold": {
+        "correct": 118,
+        "total": 160,
+        "accuracy": 0.7375,
+        "balanced_accuracy": 0.671875,
+        "precision": 1.0,
+        "recall": 0.34375,
+        "true_positive": 22,
+        "true_negative": 96,
+        "false_positive": 0,
+        "false_negative": 42,
+        "invalid": 0
+      },
+      "test_calibrated_threshold": {
+        "correct": 160,
+        "total": 160,
+        "accuracy": 1.0,
+        "balanced_accuracy": 1.0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "true_positive": 64,
+        "true_negative": 96,
+        "false_positive": 0,
+        "false_negative": 0,
+        "invalid": 0
+      },
+      "test_probability_mass": {
+        "correct": 158,
+        "total": 160,
+        "accuracy": 0.9875,
+        "balanced_accuracy": 0.984375,
+        "precision": 1.0,
+        "recall": 0.96875,
+        "true_positive": 62,
+        "true_negative": 96,
+        "false_positive": 0,
+        "false_negative": 2,
+        "invalid": 0
+      },
+      "test_ranking": {
+        "precision_at_4": 1.0,
+        "recall_at_4": 1.0,
+        "ndcg_at_4": 1.0,
+        "average_precision": 1.0,
+        "pairwise_accuracy": 1,
+        "relevant_in_top4": 4
+      },
+      "test_top4_relevant": 64,
+      "test_top4_slots": 64,
+      "injection_distractors": 21,
+      "injection_distractors_correct_at_fixed_threshold": 21
+    }
+  },
+  "paired_differences": {
+    "ndcg_at_4": {
+      "jev_minus_openai": 0.0,
+      "paired_task_bootstrap_95_percent_interval": [
+        0.0,
+        0.0
+      ],
+      "tasks": 16
+    },
+    "precision_at_4": {
+      "jev_minus_openai": 0.0,
+      "paired_task_bootstrap_95_percent_interval": [
+        0.0,
+        0.0
+      ],
+      "tasks": 16
+    },
+    "calibrated_accuracy": {
+      "jev_minus_openai": -0.006249999999999999,
+      "paired_task_bootstrap_95_percent_interval": [
+        -0.018749999999999996,
+        0.0
+      ],
+      "tasks": 16
+    },
+    "fixed_accuracy": {
+      "jev_minus_openai": 0.24375000000000002,
+      "paired_task_bootstrap_95_percent_interval": [
+        0.17500000000000002,
+        0.30625
+      ],
+      "tasks": 16
+    },
+    "probability_accuracy": {
+      "jev_minus_openai": 0.012499999999999997,
+      "paired_task_bootstrap_95_percent_interval": [
+        0.0,
+        0.031249999999999993
+      ],
+      "tasks": 16
+    }
+  },
+  "scope": {
+    "tasks": 24,
+    "candidates_per_task": 10,
+    "repeats": 3,
+    "requests_per_provider": 72,
+    "labels": "Agent-authored synthetic relevance labels",
+    "calibration_tasks": 8,
+    "test_tasks": 16
+  },
+  "prices_usd_per_million_input_tokens": {
+    "jev": 0.042,
+    "openai": 0.1
+  },
+  "pricing_sources": [
+    "https://docs.typesafe.ai/models",
+    "https://developers.openai.com/api/docs/guides/decisions"
+  ]
+}

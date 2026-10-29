@@ -19,12 +19,14 @@ pub struct Provider {
     pub model: String,
     pub key: String,
     pub wire_format: WireFormat,
+    pub fallback: Option<Box<Provider>>,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Config {
     default: String,
+    fallback: Option<String>,
     profiles: BTreeMap<String, Profile>,
 }
 
@@ -117,7 +119,11 @@ impl Provider {
 }
 
 fn select(bytes: Option<&[u8]>, env: impl Fn(&str) -> Option<String>) -> Result<Provider> {
-    let (name, profile) = if let Some(bytes) = bytes {
+    select_env(bytes, &env)
+}
+
+fn select_env(bytes: Option<&[u8]>, env: &dyn Fn(&str) -> Option<String>) -> Result<Provider> {
+    let (name, profile, fallback_name) = if let Some(bytes) = bytes {
         if bytes.len() > FILE_LIMIT {
             bail!("Provider configuration exceeds 64 KiB");
         }
@@ -129,6 +135,13 @@ fn select(bytes: Option<&[u8]>, env: impl Fn(&str) -> Option<String>) -> Result<
             || !config.profiles.contains_key(&config.default)
         {
             bail!("Invalid provider profile count or default");
+        }
+        if config.fallback.as_ref().is_some_and(|name| {
+            name == &config.default
+                || !identifier(name, false)
+                || !config.profiles.contains_key(name)
+        }) {
+            bail!("Invalid configured fallback provider");
         }
         for (name, p) in &config.profiles {
             if !identifier(name, false)
@@ -143,7 +156,13 @@ fn select(bytes: Option<&[u8]>, env: impl Fn(&str) -> Option<String>) -> Result<
             validate_endpoint(&p.endpoint)?;
             validate_model(&p.model)?;
         }
-        let name = env("SKILL_ROUTER_PROVIDER").unwrap_or(config.default);
+        let explicit = env("SKILL_ROUTER_PROVIDER");
+        let fallback_name = if explicit.is_none() {
+            config.fallback
+        } else {
+            None
+        };
+        let name = explicit.unwrap_or(config.default);
         if !identifier(&name, false) {
             bail!("Invalid selected provider identifier");
         }
@@ -151,7 +170,7 @@ fn select(bytes: Option<&[u8]>, env: impl Fn(&str) -> Option<String>) -> Result<
             .profiles
             .remove(&name)
             .ok_or_else(|| anyhow::anyhow!("Selected provider is not configured"))?;
-        (name, profile)
+        (name, profile, fallback_name)
     } else {
         let name = env("SKILL_ROUTER_PROVIDER").unwrap_or_else(|| "jev".into());
         if name != "jev" {
@@ -167,6 +186,7 @@ fn select(bytes: Option<&[u8]>, env: impl Fn(&str) -> Option<String>) -> Result<
                 model_env: Some("JEV_MODEL".into()),
                 wire_format: WireFormat::Systemone,
             },
+            None,
         )
     };
     let endpoint = profile
@@ -191,12 +211,25 @@ fn select(bytes: Option<&[u8]>, env: impl Fn(&str) -> Option<String>) -> Result<
     {
         bail!("Invalid selected provider API key header");
     }
+    let fallback = fallback_name
+        .map(|name| {
+            select_env(bytes, &|key| {
+                if key == "SKILL_ROUTER_PROVIDER" {
+                    Some(name.clone())
+                } else {
+                    env(key)
+                }
+            })
+            .map(Box::new)
+        })
+        .transpose()?;
     Ok(Provider {
         name,
         endpoint,
         model,
         key,
         wire_format: profile.wire_format,
+        fallback,
     })
 }
 
@@ -487,5 +520,41 @@ mod tests {
             ("perplexity", "pplx-decider-v1.1-27b", "pplx-key")
         );
         assert_eq!(p.endpoint, "https://api.perplexity.ai/v1/decisions");
+    }
+
+    #[test]
+    fn default_has_openai_standby_but_explicit_selection_is_strict() {
+        let bytes = include_bytes!("../decision-providers.json");
+        let provider = select(
+            Some(bytes),
+            env(&[
+                ("TYPESAFE_API_KEY", "primary"),
+                ("OPENAI_API_KEY", "standby"),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(provider.name, "jev");
+        let fallback = provider.fallback.unwrap();
+        assert_eq!(fallback.name, "openai");
+        assert_eq!(fallback.wire_format, WireFormat::OpenaiDecisions);
+        assert_eq!(fallback.key, "standby");
+        let provider = select(Some(bytes), |name| match name {
+            "SKILL_ROUTER_PROVIDER" => Some("jev".into()),
+            "TYPESAFE_API_KEY" => Some("primary".into()),
+            "OPENAI_API_KEY" => panic!("Explicit selection must not load standby credentials"),
+            _ => None,
+        })
+        .unwrap();
+        assert!(provider.fallback.is_none());
+    }
+
+    #[test]
+    fn fallback_must_be_distinct_and_configured() {
+        for fallback in ["missing", "jev", "../bad"] {
+            let mut config: serde_json::Value =
+                serde_json::from_slice(include_bytes!("../decision-providers.json")).unwrap();
+            config["fallback"] = serde_json::json!(fallback);
+            assert!(select(Some(&serde_json::to_vec(&config).unwrap()), env(&[])).is_err());
+        }
     }
 }

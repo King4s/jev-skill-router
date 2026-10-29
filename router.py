@@ -634,7 +634,7 @@ def corpus_meta(db: sqlite3.Connection) -> dict:
             "coverage": json.loads(stored["coverage"]) if "coverage" in stored else None}
 
 
-def score_candidates(project: str, cands: list[dict], provider: str = "jev",
+def score_candidates(project: str, cands: list[dict], provider: str = "both",
                      jev_model: str | None = None, perplexity_model: str | None = None,
                      priority_profile=None, openai_model: str | None = None) -> dict:
     """Rank candidates with the preferred provider, then fail over only as needed."""
@@ -642,7 +642,7 @@ def score_candidates(project: str, cands: list[dict], provider: str = "jev",
         raise ProviderError("Choose a decision provider: jev, perplexity, openai, or both.")
     if not isinstance(project, str) or not project.strip():
         raise ProviderError("The project description must not be empty.")
-    names = ["jev", "perplexity"] if provider == "both" else [provider]
+    names = ["jev", "openai"] if provider == "both" else [provider]
     overrides = {"jev": jev_model, "perplexity": perplexity_model, "openai": openai_model}
     result = {"schema_version": 1, "project": project, "provider": provider,
               "aggregation": "priority_failover" if provider == "both" else "single",
@@ -688,6 +688,7 @@ def score_candidates(project: str, cands: list[dict], provider: str = "jev",
             options = {"model": metadata["requested_model"]}
             if provider == "both":
                 options["retries"] = 0
+                options["timeout"] = 30
             body = decision_body(name, metadata["requested_model"], state, batch)
             if len(body) > MAX_REQUEST_BYTES:
                 raise ProviderError(f"{name} request exceeds client budget of {MAX_REQUEST_BYTES} bytes; reduce --top")
@@ -858,7 +859,7 @@ def annotate_installed(ranked: list[dict], installed: dict[str, str]) -> list[st
 
 
 def cmd_route(args) -> int:
-    provider = getattr(args, "provider", None) or os.environ.get("SKILL_ROUTER_PROVIDER", "jev")
+    provider = getattr(args, "provider", None) or os.environ.get("SKILL_ROUTER_PROVIDER", "both")
     if provider not in ("jev", "perplexity", "openai", "both"):
         raise ProviderError("SKILL_ROUTER_PROVIDER must be jev, perplexity, openai, or both.")
     if not args.project.strip():
@@ -1003,7 +1004,7 @@ def main() -> int:
     c.add_argument("--rule", choices=RULES, default="plain")
     c.add_argument("--out")
     c.add_argument("--provider", choices=("jev", "perplexity", "openai", "both"),
-                   help="Decision maker selection; overrides SKILL_ROUTER_PROVIDER (default: jev).")
+                   help="Decision maker selection; overrides SKILL_ROUTER_PROVIDER (default: both, Jev then OpenAI).")
     c.add_argument("--jev-model", help="Override JEV_MODEL (default: jev-latest).")
     c.add_argument("--perplexity-model", help="Override PERPLEXITY_DECISION_MODEL (default: pplx-decider-v1.1-27b).")
     c.add_argument("--openai-model", help="Override OPENAI_DECISION_MODEL (currently only gpt-6-luna).")

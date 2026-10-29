@@ -137,7 +137,7 @@ def _retry_delay(headers, attempt: int) -> float:
 
 
 def decision_call(provider: str, state: dict, questions: dict, retries: int = 3,
-                  model: str | None = None) -> dict:
+                  model: str | None = None, timeout: float | None = None) -> dict:
     """Call one provider, failing permanent errors without retrying paid requests.
 
     Perplexity contract: https://docs.perplexity.ai/docs/decisions/quickstart
@@ -150,12 +150,14 @@ def decision_call(provider: str, state: dict, questions: dict, retries: int = 3,
         raise ProviderError(f"A provider request needs 1 to {MAX_QUESTIONS} questions.")
     if not isinstance(retries, int) or isinstance(retries, bool) or not 0 <= retries <= 3:
         raise ProviderError("Retries must be an integer from 0 to 3.")
+    if timeout is not None and (type(timeout) not in (int, float) or not math.isfinite(timeout) or not 1 <= timeout <= 180):
+        raise ProviderError("Timeout must be a finite number from 1 to 180 seconds.")
     body = decision_body(provider, selected, state, questions)
     if len(body) > 32 * 1024 * 1024:
         raise ProviderError("The decision request exceeds 32 MiB.")
     request = urllib.request.Request(ENDPOINTS[provider], data=body, headers={
         "Authorization": f"Bearer {key}", "Content-Type": "application/json"})
-    timeout = 30 if provider in ("perplexity", "openai") else 180
+    timeout = timeout if timeout is not None else 30 if provider in ("perplexity", "openai") else 180
     for attempt in range(retries + 1):
         try:
             with _open(request, timeout=timeout) as response:

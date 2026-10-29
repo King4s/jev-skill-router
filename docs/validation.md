@@ -133,7 +133,7 @@ Functional checks on the same Windows host, with the inherited `PYTHONPATH` clea
 - `router.py stats` reads the live 26,013-row index (15,544 unique).
 - `router.py index --sources <2 repos> --db <temp>` completes: 21 discovered, 21 parsed,
   0 fetch/parse failures — the path the UTF-8 fix unblocked.
-- A real `router.gh_api("repos/King4s/jev-skill-router")` call returns the repository object,
+- A real `router.gh_api("repos/King4s/skill-router")` call returns the repository object,
   so the subprocess decode works against live GitHub, not only the fixture.
 - `scripts/eval_shortlist.py --help` and `scripts/rapport.py --help` start cleanly.
 Linux (WSL, Python 3.12.3) still reports 35 + 79 passing tests and a clean selftest.

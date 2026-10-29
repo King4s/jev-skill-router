@@ -1,5 +1,5 @@
 [Unit]
-Description=Jev Skill Router - read-only MCP recommendations
+Description=Skill router - read-only MCP recommendations
 After=network-online.target tailscaled.service
 Wants=network-online.target
 

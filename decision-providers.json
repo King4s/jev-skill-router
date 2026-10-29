@@ -1,5 +1,6 @@
 {
   "default": "jev",
+  "fallback": "openai",
   "profiles": {
     "jev": {
       "endpoint": "https://api.typesafe.ai/v1/systemone",

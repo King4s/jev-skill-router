@@ -458,7 +458,7 @@ fn run() -> Result<()> {
     };
     let reference: Value = serde_json::from_slice(&bounded_output(
         gh(
-            "repos/King4s/jev-skill-router/git/ref/heads/main",
+            "repos/King4s/skill-router/git/ref/heads/main",
             "Accept: application/vnd.github+json",
         ),
         65536,
@@ -472,7 +472,7 @@ fn run() -> Result<()> {
     );
     let data = bounded_output(
         gh(
-            &format!("repos/King4s/jev-skill-router/contents/Skills-list.md?ref={revision}"),
+            &format!("repos/King4s/skill-router/contents/Skills-list.md?ref={revision}"),
             "Accept: application/vnd.github.raw+json",
         ),
         LIST_LIMIT,

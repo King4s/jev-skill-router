@@ -1,17 +1,17 @@
 <div align="center">
 
-# Jev Skill Router
+# Skill router
 
 ### Retrieve skill metadata and rank it with a selected decision provider.
 
 **GitHub metadata → SQLite FTS5 → typed decision provider → ranked recommendations**
 
-[![Verification](https://github.com/King4s/jev-skill-router/actions/workflows/verify.yml/badge.svg)](https://github.com/King4s/jev-skill-router/actions/workflows/verify.yml)
+[![Verification](https://github.com/King4s/skill-router/actions/workflows/verify.yml/badge.svg)](https://github.com/King4s/skill-router/actions/workflows/verify.yml)
 ![Runtime: Rust](https://img.shields.io/badge/runtime-Rust-orange)
 ![Protocol: MCP](https://img.shields.io/badge/protocol-MCP-blue)
 ![Safety: read only](https://img.shields.io/badge/safety-read--only-2ea44f)
 
-[Quick start](#quick-start) · [MCP tools](#mcp-tools) · [Safety](#safety-and-limits) · [Verification](#verification) · [Sources](https://github.com/King4s/jev-skill-router/blob/main/Skills-list.md)
+[Quick start](#quick-start) · [MCP tools](#mcp-tools) · [Safety](#safety-and-limits) · [Verification](#verification) · [Sources](https://github.com/King4s/skill-router/blob/main/Skills-list.md)
 
 </div>
 
@@ -20,7 +20,7 @@
 A native Rust MCP server that recommends third-party agent skills for a project.
 It retrieves deduplicated metadata with SQLite FTS5/BM25, then sends **one comparable
 typed Score per candidate**, in batches of at most 128 questions, to one configured
-provider. It never installs or executes skills; the Python `route` command only
+provider, with Jev primary and OpenAI fallback by default. It never installs or executes skills; the Python `route` command only
 marks which recommendations are already installed on the machine.
 
 The native server is **Unix-only**: `src/main.rs` installs Unix signal handlers and the
@@ -31,7 +31,7 @@ The Python indexer (with PyYAML) and evaluation scripts are **offline tooling**.
 The Rust service opens SQLite read-only and calls the selected provider directly: no Python wrapper,
 shell subprocess, or skill execution in the runtime.
 
-Native configurable providers were merged in [PR #5](https://github.com/King4s/jev-skill-router/pull/5).
+Native configurable providers were merged in [PR #5](https://github.com/King4s/skill-router/pull/5).
 This release also preserves the existing exact-skill exclusion guard: both search
 and routing filter before truncating the shortlist and reload configured policy
 on each request. Repository publication does not itself update a running service.
@@ -43,12 +43,12 @@ proof of a later deployment or live Perplexity success.
 Requirements: Rust/Cargo, Python 3 with SQLite FTS5, authenticated [GitHub CLI](https://cli.github.com/),
 and the selected decision provider's API key for ranking. Retrieval needs no model key.
 This checkout includes the native implementation introduced by
-[PR #1](https://github.com/King4s/jev-skill-router/pull/1).
+[PR #1](https://github.com/King4s/skill-router/pull/1).
 The refresh utility consumes `main`'s source list without importing its executable code.
 
 ```sh
-git clone https://github.com/King4s/jev-skill-router.git
-cd jev-skill-router
+git clone https://github.com/King4s/skill-router.git
+cd skill-router
 python3 -m venv .venv
 . .venv/bin/activate
 python3 -m pip install -r requirements-offline.txt
@@ -69,49 +69,45 @@ The native service does **not** read Python's fallback key file. Supply its key 
 
 ### Native decision providers
 
-At **process startup**, the runtime loads `decision-providers.json` from its current
-working directory, or the explicit `SKILL_ROUTER_PROVIDERS_FILE` path. The file's
-`default` is `jev`; `SKILL_ROUTER_PROVIDER` overrides that profile selection. This
-is not a per-tool-request option. Profile edits, reselection and environment changes
-require a process restart, unlike a DB-only snapshot replacement.
+At startup, the runtime loads `decision-providers.json` from its working directory
+or `SKILL_ROUTER_PROVIDERS_FILE`. The shipped default is **Jev primary → OpenAI
+fallback**. The fallback receives only candidates without a valid primary answer.
+A valid low-confidence Jev answer does not trigger another paid call.
 
-The shipped non-secret [profiles](decision-providers.json) are:
-
-| Profile | Endpoint | Model in the runtime file | Key environment variable |
+| Profile | Endpoint | Model | Key environment variable |
 |---|---|---|---|
 | `jev` | `https://api.typesafe.ai/v1/systemone` | `jev-latest` | `TYPESAFE_API_KEY` |
-| `perplexity` | `https://api.perplexity.ai/v1/decisions` | `pplx-decider-v1.1-27b` | `PERPLEXITY_API_KEY` |
 | `openai` | `https://api.openai.com/v1/decisions` | `gpt-6-luna` | `OPENAI_API_KEY` |
+| `perplexity` | `https://api.perplexity.ai/v1/decisions` | `pplx-decider-v1.1-27b` | `PERPLEXITY_API_KEY` |
 
-Model IDs come from the runtime file or an explicitly configured environment
-override, not Rust defaults. Each profile requires `endpoint`, `model` and `key_env`;
-optional `endpoint_env` and `model_env` name its allowed overrides. The shipped Jev
-profile opts into `JEV_API` and `JEV_MODEL`. Perplexity does not implicitly read those
-variables (or `PERPLEXITY_DECISION_MODEL`); change its file values or explicitly add
-its own override names. Only the selected profile's `key_env` is read for credentials.
+The top-level `default` and optional `fallback` name distinct configured profiles.
+`SKILL_ROUTER_PROVIDER=jev`, `openai`, or `perplexity` explicitly selects one strict
+provider and disables fallback. Omit that override to use the default chain.
+Only the profiles in the selected chain load credentials. A missing standby key
+does not prevent a healthy Jev request. A missing primary key can use the standby.
+Stats, search, and empty routes need no provider credentials.
 
-The optional OpenAI profile uses `wire_format: "openai_decisions"` and permits
-`OPENAI_DECISION_MODEL`. Other profiles default to `wire_format: "systemone"`.
-The OpenAI adapter translates the shared evidence, named score questions and
-ordered levels to the [OpenAI Decisions API](https://developers.openai.com/api/docs/guides/decisions),
-then normalizes named answer/probability arrays for the existing score validator.
-Duplicate or unknown answer names fail the batch; missing, refused or malformed
-scores are rejected without discarding valid answers from other questions.
-Only `gpt-6-luna` is currently accepted for this format. Select it explicitly with
-`SKILL_ROUTER_PROVIDER=openai`; the default stays Jev. All serialized OpenAI
-batches are checked against the same 128-question/128-KiB limits before any call.
+Each profile requires `endpoint`, `model`, and `key_env`. Optional `endpoint_env`
+and `model_env` declare allowed overrides. `wire_format` defaults to `systemone`;
+OpenAI uses `openai_decisions`, translating shared input, named question arrays,
+levels, and returned probability arrays into the existing internal score contract.
+OpenAI currently accepts only `gpt-6-luna`. The shipped OpenAI profile declares
+`OPENAI_DECISION_MODEL`; Jev declares `JEV_API` and `JEV_MODEL`.
 
-Add other compatible **typed Decisions** profiles without code changes: the endpoint
-must accept the same `model`/`state`/`questions` request and return typed Score answers
-keyed by question ID. This is not a generic chat-API adapter. Native selection has
-no automatic fallback, fanout or `both` policy; Python's priority profile is not used.
+All batches for both providers are preflighted before any paid request. The
+default chain makes one attempt per provider with a 30-second per-attempt timeout,
+then switches on unavailability, transport errors, refusals, or malformed/missing
+answers. A failed provider is not called again for later batches. Explicit
+single-provider mode retains bounded retries and its 180-second attempt timeout.
+Scores are never averaged across providers. Valid primary answers survive fallback
+failure. Per-result `used_providers`, `is_fallback`, and `provider_errors` identify
+what happened; route metadata includes `used_providers` and actual response models.
+Successful fallback is marked degraded, while zero accepted answers is a tool error.
 
-A missing selected key does not block startup, stats, search or empty routes;
-nonempty ranking requires both a selected key and model. Invalid configuration fails
-startup. Only a missing implicit cwd file enables legacy Jev mode: it reads
-`TYPESAFE_API_KEY`, permits `JEV_API`, and **requires an explicit `JEV_MODEL` for
-nonempty ranking**. There is no hardcoded model default. A missing explicit file or
-a fileless non-Jev selection fails instead of silently switching providers.
+Only a missing implicit configuration file permits legacy Jev-only mode, which
+requires an explicit `JEV_MODEL` for ranking. Missing explicit files, invalid
+profiles, and fileless non-Jev selections fail closed. Provider configuration is
+loaded at startup and requires a restart after edits; database replacement does not.
 
 ### Shared internal endpoint
 
@@ -144,6 +140,11 @@ configured model, and `meta.response_models` the response model for each batch
 (null when absent). `meta.model` is null if batch models are missing or differ;
 otherwise it is their shared response model, not the requested alias.
 
+The product and MCP server are named **Skill router** (`skill-router`). The
+`jev-skill-router` Cargo package/binary, `jev-skill-refresh` utility, and existing
+service/account paths remain compatibility names so upgrades do not break installed
+launchers. New skill installations use the `skill-router` directory and identifier.
+
 **Scores measure relevance, not permission to install.** Read the upstream skill and
 inspect confidence as well as score before making a separate installation decision.
 
@@ -159,7 +160,7 @@ flowchart LR
     F --> G[Validated ranked recommendations]
 ```
 
-- The [current GitHub-main `Skills-list.md`](https://github.com/King4s/jev-skill-router/blob/main/Skills-list.md)
+- The [current GitHub-main `Skills-list.md`](https://github.com/King4s/skill-router/blob/main/Skills-list.md)
   is the refresh authority. Its source count can change with weekly updates; the
   108-source count below belongs to the dated 2026-10-11 receipt, not a current guarantee.
   Numbered sections map to provenance tiers; the flagged/excluded section is not ingested. Site-only
@@ -229,7 +230,7 @@ listed repository fails the entire refresh; it is never silently dropped. See th
 manual execution, failure diagnostics and rollback.
 
 **Verified live on 2026-10-11:** the installed job published the then-current **108-source**
-authority after the owner-approved single-source exclusion in [PR #4](https://github.com/King4s/jev-skill-router/pull/4).
+authority after the owner-approved single-source exclusion in [PR #4](https://github.com/King4s/skill-router/pull/4).
 The MCP endpoint served the new snapshot without a restart: **15,682 canonical records**,
 **26,098 source rows**, **26,596 fully accounted paths**, zero fetch/parse failures,
 and 40 validated candidates from the real Jev provider. Daily consumption is enabled;
@@ -243,12 +244,12 @@ this successful manual run does not claim the next scheduled tick has already oc
 | Database | Existing file required; read-only opens; snapshot-consistent retrieval |
 | HTTP | Bearer auth, exact bound Host, reject Origin, 256 KiB actual-body limit including chunked requests |
 | Ranking capacity | Four shared, non-queueing permits; excess requests fail explicitly |
-| Provider budget | At most 128 questions and 128 KiB per serialized batch; all batches preflighted before the first provider call; 2 MiB per response; 180-second per-attempt timeout |
+| Provider budget | At most 128 questions and 128 KiB per serialized batch; all batches preflighted before the first provider call; 2 MiB per response; 30-second failover attempts, 180-second strict-mode attempts |
 | Provider endpoint | HTTPS, or loopback HTTP only; no URL credentials, query or fragment; redirects disabled |
-| Retries | At most four attempts per request; bounded backoff/Retry-After; delays over 30 seconds fail; permanent errors fail immediately |
+| Retries | One attempt per provider in failover; up to four in strict mode; bounded backoff/Retry-After; delays over 30 seconds fail; permanent errors fail immediately |
 | Provider trust | Finite JSON numbers, exact probability keys, bounded probabilities, normalized sum and score consistency |
-| Error handling | Unknown answer IDs reject the affected batch; partial/no-valid distinctions preserved; no provider fallback |
-| Credentials | Only the selected profile's key environment variable; provider bodies and transport errors not echoed |
+| Error handling | Invalid/missing answers use only the configured standby; partial/no-valid distinctions and errors are preserved |
+| Credentials | Only selected-chain key variables; provider bodies and transport details are not echoed |
 
 Probability normalization permits a 0.02 rounding tolerance; the four-level weighted
 mean permits 0.04. These are validation tolerances, not claims of model accuracy.
@@ -301,7 +302,7 @@ and report fields below do not configure native routing.
 ```
 python3 router.py index                      # build/refresh the index (network, ~10 min)
 python3 router.py stats                      # what is in it
-python3 router.py route "describe project"   # Jev remains the default
+python3 router.py route "describe project"   # Jev primary, OpenAI fallback
 python3 router.py route "describe project" --provider perplexity
 python3 router.py route "describe project" --provider both --out ranking.json
 python3 router.py route "describe project" --provider both --priority-profile my-priority.json
@@ -328,26 +329,19 @@ and are never written into the repository or routing output:
 | Selection | Required credentials | Default model |
 |---|---|---|
 | `jev` | `TYPESAFE_API_KEY`, or `~/.config/jev-loop/typesafe_api_key` | `jev-latest` |
-| `perplexity` | `PERPLEXITY_API_KEY` | `pplx-decider-v1.1-27b` |
 | `openai` | `OPENAI_API_KEY` | `gpt-6-luna` |
-| `both` | At least one usable provider credential; unavailable providers are reported and skipped | Available models above |
+| `perplexity` | `PERPLEXITY_API_KEY` | `pplx-decider-v1.1-27b` |
+| `both` (default) | At least one usable Jev/OpenAI credential | Jev first; OpenAI only when needed |
 
-`--provider` overrides `SKILL_ROUTER_PROVIDER` (default `jev`). Use `--jev-model`
-or `--perplexity-model` to override `JEV_MODEL` or `PERPLEXITY_DECISION_MODEL`.
-For OpenAI use `--provider openai`, with optional `--openai-model` or
-`OPENAI_DECISION_MODEL` (currently only `gpt-6-luna` is supported). For example:
+`--provider` overrides `SKILL_ROUTER_PROVIDER`, whose default is `both` in Python.
+Explicit single-provider selections never switch services. Model options are
+`--jev-model`, `--openai-model`, and `--perplexity-model`, with corresponding
+`JEV_MODEL`, `OPENAI_DECISION_MODEL`, and `PERPLEXITY_DECISION_MODEL` variables.
+The fallback policy never calls Perplexity implicitly.
 
 ```sh
-python3 -B router.py route "Build an accessible dashboard" --provider openai --top 40 --show 5
+python3 -B router.py route "Build an accessible dashboard" --provider both --top 40 --show 5
 ```
-
-OpenAI is explicit opt-in: `both` still selects only Perplexity and Jev and does
-not send data to OpenAI. Its existing accuracy/cost priority profile is unchanged;
-adding the adapter does not establish OpenAI routing accuracy or account access.
-Only the selected providers receive requests. Explicit `jev`, `perplexity`, and `openai`
-selections require the chosen provider and never switch services. In `both`, only
-the provider currently needed receives the task and candidate metadata; a missing
-or invalid key/model is reported without blocking use of the other.
 
 ## Local installation check
 
@@ -373,43 +367,27 @@ for transient errors; authentication errors fail immediately. In `both`, a faile
 request proceeds to fallback without retries. A rate-limit delay longer than 30
 seconds fails instead of retrying before the server allows it.
 
-## Provider priority: accuracy first, cost breaks ties
+## Provider priority
 
-`both` is ordered failover. With valid, model-matched measurements, the provider
-with higher measured accuracy goes first. If accuracy is exactly tied, lower
-measured cost per candidate breaks the tie. Response confidence is not a measure
-of provider accuracy and cannot establish which provider is better.
+The default Python policy is **Jev → OpenAI**. The owner selected this order after
+the [2026-10-29 local comparison](docs/evaluations/2026-10-29-jev-openai.json):
+ranking tied on the synthetic held-out tasks, while Jev had lower latency and
+estimated complete-request cost. This is local evidence, not a claim of universal
+model superiority. Perplexity is an explicit single-provider option.
 
-The shipped [priority profile](provider-priority.json) starts with **Perplexity →
-Jev**, using this external DecisionBench snapshot inspected on 2026-10-10:
+`provider-priority.json` records an explicit `order` and reports
+`basis: user_selected_order`. This preference is distinct from measured accuracy.
+A custom profile without `order` retains model-matched accuracy-first selection,
+with measured complete-request cost breaking exact accuracy ties. Versioned
+measurements do not permanently match moving model aliases.
 
-| Decision maker | Observed accuracy | Estimated cost per 1,000 benchmark rows |
-|---|---|---|
-| `pplx-decider-v1.1-27b` | 94.49% (1,012/1,071) | $0.01698 |
-| `jev-1.13.0` | 92.44% (990/1,071) | $0.04322 |
+Python `both` is ordered failover, never fanout or averaging. Only unresolved
+candidate IDs reach the standby after a failure or unusable answer. Healthy
+primary answers, even with low confidence, incur no second provider call.
+The output preserves rejected candidates, provider errors, actual model/usage
+metadata, and which provider supplied each accepted score. If neither provider
+has a valid answer, the command exits nonzero and preserves a failure artifact.
 
-Sources: [Perplexity announcement](https://community.perplexity.ai/t/pplx-decider-v1-1-27b-scores-the-highest-on-decision-bench-for-accuracy-with-the-lowest-cost/6312),
-[published data](https://decisionbench.ai/data.json), and
-[evaluation protocol](https://decisionbench.ai/protocol.txt). These are external
-choice-question results, not this router's skill-score evaluation. Perplexity's
-benchmark run used OpenRouter; the router uses Perplexity's direct API. The
-accuracy intervals overlap, so the observed ordering does not establish universal
-superiority. Costs are estimates from that workload, not verified invoices.
-
-The profile stores model identities, accuracy, `cost_per_candidate_usd`, source,
-and sample count. Replace it with representative skill-routing measurements as
-they become available, and refresh it when model aliases resolve to new versions.
-`--priority-profile` overrides
-`SKILL_ROUTER_PRIORITY_PROFILE`; otherwise the shipped profile is used. When
-comparable quality evidence is unavailable or does not match the requested models,
-use a documented provisional price/default order and expose that basis rather
-than claiming the providers have equal quality.
-
-The provider documentation snapshot records input-token rates of $0.02 per million for Perplexity Decisions and
-$0.042 per million for Jev; both have free output tokens.
-[Perplexity pricing](https://docs.perplexity.ai/docs/decisions/quickstart#pricing),
-[TypeSafe models](https://docs.typesafe.ai/models). Actual request cost also depends
-on token usage, batching, and failed attempts. Prices and measurements can change.
 
 ## Ranking and output
 
@@ -467,9 +445,10 @@ Databases, caches, binaries and local measurement artifacts are ignored, not shi
 | `SKILL_ROUTER_DB` | `skills.db`; existing SQLite snapshot |
 | `SKILL_ROUTER_EXCLUSIONS` | Unset disables filtering; a configured manifest is required, validated and reloaded per search/route request |
 | `SKILL_ROUTER_PROVIDERS_FILE` | Cwd `decision-providers.json`; explicit paths must be readable; loaded once at startup |
-| `SKILL_ROUTER_PROVIDER` | File's `default` (`jev` in the shipped file); selects one profile at startup |
-| Profile `key_env` | Selected profile's named environment variable; required for nonempty ranking |
+| `SKILL_ROUTER_PROVIDER` | Omit for native Jev → OpenAI defaults; set a profile for strict mode. Python defaults to `both`. |
+| Profile `key_env` | Selected-chain environment variables; ranking requires at least one ready provider |
 | `TYPESAFE_API_KEY` | Shipped Jev and fileless legacy Jev key |
+| `OPENAI_API_KEY` | Shipped OpenAI standby key |
 | `PERPLEXITY_API_KEY` | Shipped Perplexity key; never substitutes for a Jev key |
 | `JEV_API` | Override only for profiles opting in, including shipped/legacy Jev; legacy endpoint is `https://api.typesafe.ai/v1/systemone` |
 | `JEV_MODEL` | Override only for profiles opting in; required for fileless legacy ranking; no Rust model default |

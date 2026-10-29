@@ -35,24 +35,28 @@ Tailnet address and credentials rather than committing an environment file:
 - `SKILL_ROUTER_BIND=<tailnet-ip>:3016`
 - `SKILL_ROUTER_TOKEN=<random-secret-at-least-32-ascii-bytes>`
 - `SKILL_ROUTER_PROVIDERS_FILE=/etc/jev-skill-router.providers.json`
-- `SKILL_ROUTER_PROVIDER=jev` (or another approved profile, such as `perplexity`)
-- The selected profile's key variable: `TYPESAFE_API_KEY=<typesafe-key>` for Jev,
-  or `PERPLEXITY_API_KEY=<perplexity-key>` for Perplexity; keep it in this protected file.
+- `TYPESAFE_API_KEY=<typesafe-key>` for the Jev primary.
+- `OPENAI_API_KEY=<openai-key>` for the OpenAI standby; keep both in this protected file.
+- Omit `SKILL_ROUTER_PROVIDER` for the default Jev → OpenAI policy. Set it to
+  `jev`, `openai`, or `perplexity` only to force one strict provider with no fallback.
 
 Selection occurs once at **process startup**. The runtime file defines `default`
-and `profiles`; the supplied default is `jev`. An explicit
-`SKILL_ROUTER_PROVIDER` overrides it. Each profile defines `endpoint`, `model` and
+and `profiles`; the supplied default is `jev` with `fallback: openai`. An explicit
+`SKILL_ROUTER_PROVIDER` disables fallback and overrides the primary. Each profile defines `endpoint`, `model` and
 `key_env`, optionally `endpoint_env` and `model_env`. Model IDs are runtime data,
-not Rust defaults; only the selected profile's key variable is read. Shipped Jev
+not Rust defaults; only selected-chain key variables are read. Shipped Jev
 opts into `JEV_API`/`JEV_MODEL`; shipped Perplexity does not implicitly use Jev
 variables or Python's `PERPLEXITY_DECISION_MODEL`. Use the profile file or explicit
 override names to change its endpoint/model.
 
 Other compatible typed Decisions profiles require no code changes, but must use
-the same request and Score-answer contract, not a chat API. There is no native
-fallback, fanout or `both` policy. HTTPS or loopback HTTP only is accepted, with
+the same request and Score-answer contract, not a chat API. OpenAI uses the
+`openai_decisions` wire adapter; other profiles default to `systemone`. Native
+fallback sends only unresolved candidates to the configured standby, uses no
+retries and a 30-second attempt timeout, and never averages answers. Healthy
+Jev answers never trigger an OpenAI call. HTTPS or loopback HTTP only is accepted, with
 redirects disabled. A missing selected key permits stats/search/empty routes, but
-nonempty ranking requires that key and model. Invalid profiles fail startup.
+nonempty ranking requires a ready provider in the selected chain. Invalid profiles fail startup.
 
 The implicit default file is cwd `decision-providers.json`, not a path relative
 to the binary. Do not rely on systemd's working directory: set the explicit file
@@ -136,7 +140,7 @@ source until the owner authorizes permanent removal.
 ## Automatic source-list consumption
 
 The separate Rust `jev-skill-refresh` utility consumes the current `Skills-list.md`
-from `King4s/jev-skill-router` on GitHub. It pins the `main` commit before fetching
+from `King4s/skill-router` on GitHub. It pins the `main` commit before fetching
 that one Markdown file. **It never fetches or updates executable code.** The
 installed offline indexer remains the reviewed version with pinned PyYAML; the MCP
 binary still contains no Python/shell launcher.
@@ -204,7 +208,7 @@ failed at `wanghuan9/skilldock` in the then-current 109-source list. The journal
 `discovery_failed` with that repo and `refresh_exit_status=1`; the live DB SHA-256
 remained `1e93dda087ac38ac946e95916f61d129419fcf73cebb2eedb30f67d6ecd8195b`.
 The source-authority blocker was subsequently resolved with explicit owner approval
-in the one-file [PR #4](https://github.com/King4s/jev-skill-router/pull/4): only
+in the one-file [PR #4](https://github.com/King4s/skill-router/pull/4): only
 `wanghuan9/skilldock` moved to documented `Flagged / excluded`, retaining its metadata.
 The installed exact-cron-command run then **published the then-current 108-source snapshot**
 on 2026-10-11 at 20:56:43 host-local time, with `refresh_exit_status=0`.
